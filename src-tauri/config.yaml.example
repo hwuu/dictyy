@@ -1,0 +1,10 @@
+# Dictyy LLM 配置文件示例
+# 复制为 config.yaml 并填入真实的 API 信息
+
+llm:
+  api_base: "https://api.example.com/v1"
+  api_key: "your-api-key-here"
+  model: "your-model-name"
+  temperature: 0.3
+  max_tokens: 2048
+  timeout: 30
