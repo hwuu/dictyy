@@ -3,7 +3,6 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Loader2, X } from "lucide-react";
 import { WordResult } from "@/components/WordResult";
 import { SearchSuggestions } from "@/components/SearchSuggestions";
@@ -16,6 +15,8 @@ import {
   createLlmResult,
   searchWords,
   WordSuggestion,
+  getLlmConfig,
+  LlmConfigInfo,
 } from "@/services/dictionary";
 
 function App() {
@@ -24,6 +25,7 @@ function App() {
   const [isLlmLoading, setIsLlmLoading] = useState(false);
   const [result, setResult] = useState<ParsedWordContent | null>(null);
   const [notFound, setNotFound] = useState(false);
+  const [llmConfig, setLlmConfig] = useState<LlmConfigInfo | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // 搜索建议相关状态
@@ -43,6 +45,13 @@ function App() {
     return () => {
       unlisten.then((fn) => fn());
     };
+  }, []);
+
+  // 获取 LLM 配置
+  useEffect(() => {
+    getLlmConfig()
+      .then(setLlmConfig)
+      .catch((err) => console.error("Failed to get LLM config:", err));
   }, []);
 
   // 搜索建议
@@ -125,7 +134,12 @@ function App() {
   }
 
   async function doSearch(searchWord: string) {
-    if (!searchWord.trim()) return;
+    if (!searchWord.trim()) {
+      // 清空结果，显示默认内容
+      setResult(null);
+      setNotFound(false);
+      return;
+    }
     setIsSearching(true);
     setIsLlmLoading(false);
     setNotFound(false);
@@ -163,87 +177,103 @@ function App() {
   }
 
   return (
-    <div className="h-screen bg-background p-4 overflow-hidden">
-      <Card className="w-full shadow-lg h-full flex flex-col">
-        <CardHeader className="pb-2 flex-shrink-0 flex flex-row items-center justify-between">
-          <CardTitle className="text-lg">Dictyy 词典</CardTitle>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-6 w-6"
-            onClick={() => getCurrentWindow().hide()}
-          >
-            <X className="h-4 w-4" />
-          </Button>
-        </CardHeader>
-        <CardContent className="flex-1 overflow-hidden flex flex-col">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              handleSearch();
-            }}
-            className="flex gap-2 flex-shrink-0"
-          >
-            <div className="relative flex-1 min-w-0">
-              <Input
-                ref={inputRef}
-                value={word}
-                onChange={(e) => setWord(e.target.value)}
-                onKeyDown={handleKeyDown}
-                onFocus={() => {
-                  if (suggestions.length > 0 && !result && !isSearching) {
-                    setShowSuggestions(true);
-                  }
-                }}
-                onBlur={() => {
-                  // 延迟关闭以允许点击建议
-                  setTimeout(() => setShowSuggestions(false), 150);
-                }}
-                placeholder="输入单词..."
-                className="w-full"
-                autoFocus
-              />
-              <SearchSuggestions
-                suggestions={suggestions}
-                selectedIndex={selectedIndex}
-                onSelect={selectSuggestion}
-                visible={showSuggestions}
-              />
-            </div>
-            <Button type="submit" disabled={isSearching} className="shrink-0">
-              {isSearching ? "..." : "查询"}
-            </Button>
-          </form>
+    <div className="h-screen bg-background flex flex-col overflow-hidden">
+      {/* Caption Bar - 可拖动 */}
+      <div
+        className="flex items-center justify-between px-3 py-1.5 bg-muted/50 border-b cursor-move select-none"
+        onMouseDown={() => getCurrentWindow().startDragging()}
+      >
+        <span className="text-sm font-medium">Dictyy 词典</span>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 cursor-default hover:bg-foreground/10"
+          onClick={() => getCurrentWindow().hide()}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <X className="h-4 w-4" />
+        </Button>
+      </div>
 
-          <div className="mt-4 flex-1 overflow-y-auto">
-            {isSearching && (
-              <p className="text-muted-foreground text-sm">查询中...</p>
-            )}
-            {isLlmLoading && (
-              <p className="text-muted-foreground text-sm flex items-center gap-2">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                词典未收录，正在请求 LLM...
-              </p>
-            )}
-            {notFound && (
-              <p className="text-muted-foreground text-sm">
-                未找到: "{word}"
-              </p>
-            )}
-            {result && <WordResult word={result} />}
-            {!result && !notFound && !isSearching && !isLlmLoading && (
-              <div className="text-muted-foreground text-sm">
-                <p>输入单词开始查询</p>
-                <p className="mt-2 text-xs">
-                  <kbd className="px-1 py-0.5 bg-muted rounded text-xs">Ctrl+`</kbd> 显示/隐藏
-                  {" | "}
-                  <kbd className="px-1 py-0.5 bg-muted rounded text-xs">Esc</kbd> 隐藏
-                </p>
-              </div>
-            )}
+      {/* 主内容区 */}
+      <div className="flex-1 p-4 overflow-hidden flex flex-col">
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            handleSearch();
+          }}
+          className="flex gap-2 flex-shrink-0"
+        >
+          <div className="relative flex-1 min-w-0">
+            <Input
+              ref={inputRef}
+              value={word}
+              onChange={(e) => setWord(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onFocus={() => {
+                if (suggestions.length > 0 && !result && !isSearching) {
+                  setShowSuggestions(true);
+                }
+              }}
+              onBlur={() => {
+                // 延迟关闭以允许点击建议
+                setTimeout(() => setShowSuggestions(false), 150);
+              }}
+              placeholder="输入单词或短语..."
+              className="w-full"
+              autoFocus
+            />
+            <SearchSuggestions
+              suggestions={suggestions}
+              selectedIndex={selectedIndex}
+              onSelect={selectSuggestion}
+              visible={showSuggestions}
+            />
           </div>
-        </CardContent>
-      </Card>
+          <Button type="submit" disabled={isSearching} className="shrink-0">
+            {isSearching ? "..." : "查询"}
+          </Button>
+        </form>
+
+        <div className="mt-4 flex-1 overflow-y-auto">
+          {isSearching && (
+            <p className="text-muted-foreground text-sm">查询中...</p>
+          )}
+          {isLlmLoading && (
+            <p className="text-muted-foreground text-sm flex items-center gap-2">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              词典未收录，正在请求 LLM...
+            </p>
+          )}
+          {notFound && (
+            <p className="text-muted-foreground text-sm">
+              未找到: "{word}"
+            </p>
+          )}
+          {result && <WordResult word={result} />}
+          {!result && !notFound && !isSearching && !isLlmLoading && (
+            <div className="h-full flex flex-col items-center justify-center text-muted-foreground/50">
+              <div className="text-4xl mb-2">📖</div>
+              <p className="text-sm">查询单词或短语</p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Status Bar */}
+      <div className="px-3 py-1 border-t bg-muted/30 text-xs text-muted-foreground flex justify-between">
+        <div className="truncate">
+          {llmConfig?.configured ? (
+            <span>{llmConfig.api_base} | {llmConfig.model}</span>
+          ) : (
+            <span className="text-yellow-600">LLM 未配置</span>
+          )}
+        </div>
+        <div className="flex gap-3 shrink-0">
+          <span><kbd className="px-1 py-0.5 bg-muted rounded">Ctrl+`</kbd> 显示/隐藏</span>
+          <span><kbd className="px-1 py-0.5 bg-muted rounded">Esc</kbd> 隐藏</span>
+        </div>
+      </div>
     </div>
   );
 }

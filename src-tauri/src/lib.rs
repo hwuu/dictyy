@@ -1,4 +1,5 @@
 use tauri::{Manager, WindowEvent};
+use tauri_plugin_log::{Target, TargetKind};
 
 mod dictionary;
 mod llm;
@@ -9,6 +10,14 @@ mod tray;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    Target::new(TargetKind::Stdout),
+                    Target::new(TargetKind::LogDir { file_name: None }),
+                ])
+                .build(),
+        )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Focus existing window when another instance is launched
@@ -26,29 +35,30 @@ pub fn run() {
             shortcuts::setup_shortcuts,
             dictionary::lookup_word,
             dictionary::search_words,
-            llm::llm_query
+            llm::llm_query,
+            llm::get_llm_config
         ])
         .setup(|app| {
             let handle = app.handle();
 
             // Initialize dictionary
             if let Err(e) = dictionary::init_dictionary(handle) {
-                eprintln!("Failed to initialize dictionary: {}", e);
+                log::error!("Failed to initialize dictionary: {}", e);
             }
 
             // Initialize LLM
             if let Err(e) = llm::init_llm(handle) {
-                eprintln!("Failed to initialize LLM: {}", e);
+                log::error!("Failed to initialize LLM: {}", e);
             }
 
             // Initialize system tray
             if let Err(e) = tray::init_tray(handle) {
-                eprintln!("Failed to initialize tray: {}", e);
+                log::error!("Failed to initialize tray: {}", e);
             }
 
             // Initialize default shortcuts
             if let Err(e) = shortcuts::init_shortcuts(handle) {
-                eprintln!("Failed to initialize shortcuts: {}", e);
+                log::error!("Failed to initialize shortcuts: {}", e);
             }
 
             // Setup window close interception - hide instead of close

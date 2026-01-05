@@ -10,18 +10,16 @@ use tauri::{
 
 /// Tray menu item IDs
 const MENU_ID_SHOW: &str = "tray-show";
-const MENU_ID_QUERY: &str = "tray-query";
 const MENU_ID_EXIT: &str = "tray-exit";
 
 /// Initialize the system tray
 pub fn init_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), Box<dyn std::error::Error>> {
     // Build menu items
     let show_item = MenuItem::with_id(app, MENU_ID_SHOW, "Show", true, None::<&str>)?;
-    let query_item = MenuItem::with_id(app, MENU_ID_QUERY, "New Query", true, None::<&str>)?;
     let exit_item = MenuItem::with_id(app, MENU_ID_EXIT, "Exit", true, None::<&str>)?;
 
     // Build menu
-    let menu = Menu::with_items(app, &[&show_item, &query_item, &exit_item])?;
+    let menu = Menu::with_items(app, &[&show_item, &exit_item])?;
 
     // Build tray icon
     let _tray = TrayIconBuilder::new()
@@ -30,11 +28,7 @@ pub fn init_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), Box<dyn std::erro
         .icon(app.default_window_icon().unwrap().clone())
         .on_menu_event(|app, event| match event.id.as_ref() {
             MENU_ID_SHOW => {
-                show_window(app);
-            }
-            MENU_ID_QUERY => {
-                show_window(app);
-                let _ = app.emit("new-query", ());
+                show_and_focus(app);
             }
             MENU_ID_EXIT => {
                 app.exit(0);
@@ -49,7 +43,7 @@ pub fn init_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), Box<dyn std::erro
             } = event
             {
                 let app = tray.app_handle();
-                show_window(app);
+                show_and_focus(app);
             }
         })
         .build(app)?;
@@ -57,11 +51,12 @@ pub fn init_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-/// Show and focus the main window (three-step recovery)
-fn show_window<R: Runtime>(app: &AppHandle<R>) {
+/// Show window and focus input
+fn show_and_focus<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        let _ = app.emit("new-query", ());
     }
 }

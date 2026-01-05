@@ -6,5 +6,5 @@ llm:
   api_key: "your-api-key-here"
   model: "your-model-name"
   temperature: 0.3
-  max_tokens: 2048
-  timeout: 30
+  max_tokens: 4096
+  timeout: 60

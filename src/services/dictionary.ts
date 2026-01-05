@@ -75,6 +75,18 @@ export async function llmQuery(word: string): Promise<string> {
   return invoke<string>("llm_query", { word });
 }
 
+/** LLM 配置信息 */
+export interface LlmConfigInfo {
+  api_base: string;
+  model: string;
+  configured: boolean;
+}
+
+/** 获取 LLM 配置 */
+export async function getLlmConfig(): Promise<LlmConfigInfo> {
+  return invoke<LlmConfigInfo>("get_llm_config");
+}
+
 /** 解析原始 JSON content */
 export function parseWordContent(entry: WordEntry): ParsedWordContent {
   const raw = JSON.parse(entry.content);
@@ -142,18 +154,62 @@ export function parseWordContent(entry: WordEntry): ParsedWordContent {
 
 /** 创建 LLM 回退结果 */
 export function createLlmResult(word: string, llmContent: string): ParsedWordContent {
-  return {
-    word,
-    phoneticUs: null,
-    phoneticUk: null,
-    translations: [],
-    sentences: [],
-    phrases: [],
-    synonyms: [],
-    relatedWords: [],
-    rememberMethod: null,
-    sources: ["LLM"],
-    gpt4Content: null,
-    llmContent,
-  };
+  // 尝试解析 JSON
+  try {
+    // 去掉可能的 markdown 代码块包裹
+    let jsonStr = llmContent.trim();
+    if (jsonStr.startsWith("```json")) {
+      jsonStr = jsonStr.slice(7);
+    } else if (jsonStr.startsWith("```")) {
+      jsonStr = jsonStr.slice(3);
+    }
+    if (jsonStr.endsWith("```")) {
+      jsonStr = jsonStr.slice(0, -3);
+    }
+    jsonStr = jsonStr.trim();
+
+    const data = JSON.parse(jsonStr);
+
+    return {
+      word,
+      phoneticUs: data.phonetic_us || null,
+      phoneticUk: data.phonetic_uk || null,
+      translations: (data.translations || []).map((t: { pos?: string; tranCn?: string }) => ({
+        pos: t.pos || "",
+        tranCn: t.tranCn || "",
+        tranOther: null,
+      })),
+      sentences: (data.sentences || []).map((s: { en?: string; cn?: string }) => ({
+        en: s.en || "",
+        cn: s.cn || "",
+      })),
+      phrases: (data.phrases || []).map((p: { phrase?: string; meaning?: string }) => ({
+        phrase: p.phrase || "",
+        meaning: p.meaning || "",
+      })),
+      synonyms: [],
+      relatedWords: [],
+      rememberMethod: data.rememberMethod || null,
+      sources: ["LLM"],
+      gpt4Content: null,
+      llmContent: null, // JSON 解析成功，不需要 fallback
+    };
+  } catch {
+    // JSON 解析失败，降级为原始内容显示
+    console.warn("Failed to parse LLM JSON response, falling back to raw content");
+    return {
+      word,
+      phoneticUs: null,
+      phoneticUk: null,
+      translations: [],
+      sentences: [],
+      phrases: [],
+      synonyms: [],
+      relatedWords: [],
+      rememberMethod: null,
+      sources: ["LLM"],
+      gpt4Content: null,
+      llmContent, // 保留原始内容用于 fallback 显示
+    };
+  }
 }

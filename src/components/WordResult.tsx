@@ -14,8 +14,17 @@ interface WordResultProps {
 
 // Markdown 组件配置
 const markdownComponents = {
+  h1: ({ children }: { children?: React.ReactNode }) => (
+    <h1 className="font-bold text-xl mt-4 mb-2">{children}</h1>
+  ),
+  h2: ({ children }: { children?: React.ReactNode }) => (
+    <h2 className="font-bold text-lg mt-3 mb-2">{children}</h2>
+  ),
   h3: ({ children }: { children?: React.ReactNode }) => (
     <h3 className="font-semibold text-base mt-3 mb-1">{children}</h3>
+  ),
+  h4: ({ children }: { children?: React.ReactNode }) => (
+    <h4 className="font-semibold text-sm mt-2 mb-1">{children}</h4>
   ),
   p: ({ children }: { children?: React.ReactNode }) => (
     <p className="my-1 leading-relaxed">{children}</p>
@@ -32,14 +41,40 @@ const markdownComponents = {
   strong: ({ children }: { children?: React.ReactNode }) => (
     <strong className="font-semibold">{children}</strong>
   ),
+  em: ({ children }: { children?: React.ReactNode }) => (
+    <em className="italic">{children}</em>
+  ),
   code: ({ children }: { children?: React.ReactNode }) => (
     <code className="bg-muted px-1 py-0.5 rounded text-xs">{children}</code>
   ),
+  hr: () => <hr className="my-3 border-border" />,
+  blockquote: ({ children }: { children?: React.ReactNode }) => (
+    <blockquote className="border-l-4 border-muted pl-3 my-2 text-muted-foreground">
+      {children}
+    </blockquote>
+  ),
 };
+
+// 去掉 LLM 返回内容中的 markdown 代码块包裹
+function stripMarkdownCodeBlock(content: string): string {
+  // 去掉开头的 ```markdown 或 ```
+  let cleaned = content.trim();
+  if (cleaned.startsWith("```markdown")) {
+    cleaned = cleaned.slice(11);
+  } else if (cleaned.startsWith("```")) {
+    cleaned = cleaned.slice(3);
+  }
+  // 去掉结尾的 ```
+  if (cleaned.endsWith("```")) {
+    cleaned = cleaned.slice(0, -3);
+  }
+  return cleaned.trim();
+}
 
 export function WordResult({ word }: WordResultProps) {
   // 如果是 LLM 回退结果，直接显示 LLM 内容
   if (word.llmContent) {
+    const cleanContent = stripMarkdownCodeBlock(word.llmContent);
     return (
       <div className="space-y-3">
         <div className="flex items-center gap-2">
@@ -48,9 +83,9 @@ export function WordResult({ word }: WordResultProps) {
             LLM
           </Badge>
         </div>
-        <div className="text-sm markdown-content">
+        <div className="text-sm">
           <ReactMarkdown components={markdownComponents}>
-            {word.llmContent}
+            {cleanContent}
           </ReactMarkdown>
         </div>
       </div>
@@ -61,6 +96,7 @@ export function WordResult({ word }: WordResultProps) {
   const defaultOpenItems: string[] = [];
   if (word.sentences.length > 0) defaultOpenItems.push("sentences");
   if (word.phrases.length > 0) defaultOpenItems.push("phrases");
+  if (word.rememberMethod) defaultOpenItems.push("remember");
   if (word.gpt4Content) defaultOpenItems.push("gpt4");
 
   return (
@@ -130,6 +166,18 @@ export function WordResult({ word }: WordResultProps) {
                   </div>
                 ))}
               </div>
+            </AccordionContent>
+          </AccordionItem>
+        )}
+
+        {/* 记忆技巧 */}
+        {word.rememberMethod && (
+          <AccordionItem value="remember">
+            <AccordionTrigger className="text-sm py-2">
+              记忆技巧
+            </AccordionTrigger>
+            <AccordionContent>
+              <p className="text-sm">{word.rememberMethod}</p>
             </AccordionContent>
           </AccordionItem>
         )}

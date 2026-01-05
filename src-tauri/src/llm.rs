@@ -88,21 +88,39 @@ impl LlmState {
 
     /// 查询 LLM
     pub async fn query(&self, word: &str) -> Result<String, String> {
+        log::info!("[LLM] Starting query for: {}", word);
+
         let config = {
             let lock = self.config.lock().unwrap();
             lock.clone().ok_or("LLM not configured")?
         };
 
-        let prompt = format!(
-            r#"请详细解释英语单词 "{}"，包括：
-1. 音标（美式和英式）
-2. 词性和中文释义
-3. 常用例句（2-3个，带中文翻译）
-4. 常用短语搭配
-5. 词根词源（如有）
-6. 记忆技巧
+        log::info!("[LLM] Config loaded - api_base: {}, model: {}, timeout: {}s",
+            config.api_base, config.model, config.timeout);
 
-请用简洁清晰的格式回答。"#,
+        let prompt = format!(
+            r#"请解释英语单词或短语 "{}"，返回 JSON 格式（不要包含 markdown 代码块标记）：
+
+{{
+  "phonetic_us": "美式音标，如无则为 null",
+  "phonetic_uk": "英式音标，如无则为 null",
+  "translations": [
+    {{ "pos": "词性（如 n. / v. / adj.）", "tranCn": "中文释义" }}
+  ],
+  "sentences": [
+    {{ "en": "英文例句", "cn": "中文翻译" }}
+  ],
+  "phrases": [
+    {{ "phrase": "短语", "meaning": "含义" }}
+  ],
+  "rememberMethod": "记忆技巧或词源说明，如无则为 null"
+}}
+
+要求：
+1. translations 至少包含 1 个释义
+2. sentences 包含 2-3 个例句
+3. phrases 包含常用短语搭配（如有），否则为空数组
+4. 只返回 JSON，不要其他内容"#,
             word
         );
 
@@ -117,6 +135,7 @@ impl LlmState {
         };
 
         let url = format!("{}/chat/completions", config.api_base.trim_end_matches('/'));
+        log::info!("[LLM] Sending request to: {}", url);
 
         let response = self.client
             .post(&url)
@@ -126,7 +145,12 @@ impl LlmState {
             .json(&request)
             .send()
             .await
-            .map_err(|e| format!("Request failed: {}", e))?;
+            .map_err(|e| {
+                log::error!("[LLM] Request error: {:?}", e);
+                format!("Request failed: {}", e)
+            })?;
+
+        log::info!("[LLM] Response status: {}", response.status());
 
         if !response.status().is_success() {
             let status = response.status();
@@ -147,30 +171,76 @@ impl LlmState {
     }
 }
 
-/// 获取配置文件路径
-fn get_config_path() -> PathBuf {
-    // 开发模式：从 src-tauri 目录读取
-    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config.yaml");
-    if dev_path.exists() {
-        return dev_path;
+/// 获取默认配置模板路径
+fn get_default_config_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    // 从资源目录获取模板
+    let resource_dir = app.path().resource_dir().ok()?;
+    let template_path = resource_dir.join("config.yaml.example");
+    if template_path.exists() {
+        return Some(template_path);
     }
 
-    // 生产模式：从可执行文件同级目录读取
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(dir) = exe_path.parent() {
-            let prod_path = dir.join("config.yaml");
-            if prod_path.exists() {
-                return prod_path;
-            }
+    // 开发模式 fallback
+    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config.yaml.example");
+    if dev_path.exists() {
+        return Some(dev_path);
+    }
+
+    None
+}
+
+/// 确保用户配置目录存在，如果配置不存在则复制模板
+fn ensure_config(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    // 获取用户配置路径
+    let config_dir = dirs::config_dir()
+        .ok_or("Cannot determine config directory")?
+        .join("Dictyy");
+
+    // 创建目录
+    if !config_dir.exists() {
+        fs::create_dir_all(&config_dir)
+            .map_err(|e| format!("Failed to create config directory: {}", e))?;
+    }
+
+    let config_path = config_dir.join("config.yaml");
+
+    // 如果配置不存在，复制模板
+    if !config_path.exists() {
+        if let Some(template_path) = get_default_config_path(app) {
+            fs::copy(&template_path, &config_path)
+                .map_err(|e| format!("Failed to copy config template: {}", e))?;
+        } else {
+            // 没有模板，创建默认配置
+            let default_config = r#"# Dictyy LLM 配置文件
+# 请填写您的 API 配置
+
+llm:
+  api_base: "https://api.example.com/v1"
+  api_key: "your-api-key-here"
+  model: "model-name"
+  temperature: 0.3
+  max_tokens: 2048
+  timeout: 30
+"#;
+            fs::write(&config_path, default_config)
+                .map_err(|e| format!("Failed to create default config: {}", e))?;
         }
     }
 
-    dev_path
+    Ok(config_path)
 }
 
 /// 初始化 LLM
 pub fn init_llm(app: &tauri::AppHandle) -> Result<(), String> {
-    let config_path = get_config_path();
+    // 先检查开发模式配置
+    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config.yaml");
+    let config_path = if dev_path.exists() {
+        dev_path
+    } else {
+        // 生产模式：确保用户配置存在
+        ensure_config(app)?
+    };
+
     let state = app.state::<LlmState>();
     state.init(config_path)
 }
@@ -179,4 +249,30 @@ pub fn init_llm(app: &tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn llm_query(word: String, state: tauri::State<'_, LlmState>) -> Result<String, String> {
     state.query(&word).await
+}
+
+/// LLM 配置信息（用于前端显示）
+#[derive(Debug, Serialize)]
+pub struct LlmConfigInfo {
+    pub api_base: String,
+    pub model: String,
+    pub configured: bool,
+}
+
+/// Tauri command: 获取 LLM 配置信息
+#[tauri::command]
+pub fn get_llm_config(state: tauri::State<'_, LlmState>) -> LlmConfigInfo {
+    let lock = state.config.lock().unwrap();
+    match lock.as_ref() {
+        Some(config) => LlmConfigInfo {
+            api_base: config.api_base.clone(),
+            model: config.model.clone(),
+            configured: true,
+        },
+        None => LlmConfigInfo {
+            api_base: String::new(),
+            model: String::new(),
+            configured: false,
+        },
+    }
 }
