@@ -1,23 +1,30 @@
 use tauri::{Manager, WindowEvent};
-use tauri_plugin_log::{Target, TargetKind};
+use std::fs::OpenOptions;
+use std::io::Write;
 
 mod dictionary;
 mod llm;
 mod shortcuts;
 mod tray;
 
+/// 写调试日志到用户目录
+pub fn debug_log(msg: &str) {
+    if let Some(local_dir) = dirs::data_local_dir() {
+        let log_dir = local_dir.join("Dictyy");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let log_file = log_dir.join("debug.log");
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_file) {
+            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+            let _ = writeln!(file, "[{}] {}", timestamp, msg);
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    debug_log("=== Application starting ===");
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(
-            tauri_plugin_log::Builder::new()
-                .targets([
-                    Target::new(TargetKind::Stdout),
-                    Target::new(TargetKind::LogDir { file_name: None }),
-                ])
-                .build(),
-        )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Focus existing window when another instance is launched
@@ -39,27 +46,42 @@ pub fn run() {
             llm::get_llm_config
         ])
         .setup(|app| {
+            debug_log("Setup starting...");
             let handle = app.handle();
 
             // Initialize dictionary
+            debug_log("Initializing dictionary...");
             if let Err(e) = dictionary::init_dictionary(handle) {
-                log::error!("Failed to initialize dictionary: {}", e);
+                debug_log(&format!("ERROR: Failed to initialize dictionary: {}", e));
+            } else {
+                debug_log("Dictionary initialized successfully");
             }
 
             // Initialize LLM
+            debug_log("Initializing LLM...");
             if let Err(e) = llm::init_llm(handle) {
-                log::error!("Failed to initialize LLM: {}", e);
+                debug_log(&format!("ERROR: Failed to initialize LLM: {}", e));
+            } else {
+                debug_log("LLM initialized successfully");
             }
 
             // Initialize system tray
+            debug_log("Initializing tray...");
             if let Err(e) = tray::init_tray(handle) {
-                log::error!("Failed to initialize tray: {}", e);
+                debug_log(&format!("ERROR: Failed to initialize tray: {}", e));
+            } else {
+                debug_log("Tray initialized successfully");
             }
 
             // Initialize default shortcuts
+            debug_log("Initializing shortcuts...");
             if let Err(e) = shortcuts::init_shortcuts(handle) {
-                log::error!("Failed to initialize shortcuts: {}", e);
+                debug_log(&format!("ERROR: Failed to initialize shortcuts: {}", e));
+            } else {
+                debug_log("Shortcuts initialized successfully");
             }
+
+            debug_log("Setup completed");
 
             // Setup window close interception - hide instead of close
             if let Some(window) = app.get_webview_window("main") {

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getVersion } from "@tauri-apps/api/app";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Loader2, X } from "lucide-react";
@@ -26,6 +27,7 @@ function App() {
   const [result, setResult] = useState<ParsedWordContent | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [llmConfig, setLlmConfig] = useState<LlmConfigInfo | null>(null);
+  const [appVersion, setAppVersion] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
   // 搜索建议相关状态
@@ -47,11 +49,14 @@ function App() {
     };
   }, []);
 
-  // 获取 LLM 配置
+  // 获取 LLM 配置和版本号
   useEffect(() => {
     getLlmConfig()
       .then(setLlmConfig)
       .catch((err) => console.error("Failed to get LLM config:", err));
+    getVersion()
+      .then(setAppVersion)
+      .catch((err) => console.error("Failed to get app version:", err));
   }, []);
 
   // 搜索建议
@@ -269,9 +274,10 @@ function App() {
             <span className="text-yellow-600">LLM 未配置</span>
           )}
         </div>
-        <div className="flex gap-3 shrink-0">
+        <div className="flex gap-3 shrink-0 items-center">
           <span><kbd className="px-1 py-0.5 bg-muted rounded">Ctrl+`</kbd> 显示/隐藏</span>
           <span><kbd className="px-1 py-0.5 bg-muted rounded">Esc</kbd> 隐藏</span>
+          {appVersion && <span className="text-muted-foreground/60">v{appVersion}</span>}
         </div>
       </div>
     </div>

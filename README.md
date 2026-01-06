@@ -38,7 +38,7 @@ llm:
 
 ### 日志
 
-日志文件位于 `%LOCALAPPDATA%\Dictyy\logs\`。
+日志文件位于 `%LOCALAPPDATA%\Dictyy\debug.log`。
 
 ## 开发
 

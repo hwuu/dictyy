@@ -179,33 +179,57 @@ impl DictionaryState {
 }
 
 /// 获取词典数据库路径
-fn get_db_path(app: &AppHandle) -> PathBuf {
-    // 开发模式：从 src-tauri/resources 读取
+fn get_db_path(app: &AppHandle) -> Option<PathBuf> {
     // 生产模式：从 resource_dir 读取
-    let resource_dir = app.path().resource_dir().expect("Failed to get resource dir");
-    let prod_path = resource_dir.join("dict.db");
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        // 尝试多个可能的路径
+        let candidates = [
+            resource_dir.join("dict.db"),
+            resource_dir.join("resources").join("dict.db"),
+        ];
 
-    if prod_path.exists() {
-        return prod_path;
+        for path in &candidates {
+            crate::debug_log(&format!("[Dictionary] Checking path: {:?}, exists: {}", path, path.exists()));
+            if path.exists() {
+                return Some(path.clone());
+            }
+        }
     }
 
-    // 开发模式 fallback
-    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join("dict.db");
-    dev_path
+    // 开发模式：检查当前工作目录
+    let dev_candidates = [
+        std::env::current_dir().ok().map(|p| p.join("src-tauri").join("resources").join("dict.db")),
+        std::env::current_dir().ok().map(|p| p.join("resources").join("dict.db")),
+    ];
+
+    for path_opt in &dev_candidates {
+        if let Some(path) = path_opt {
+            crate::debug_log(&format!("[Dictionary] Checking dev path: {:?}, exists: {}", path, path.exists()));
+            if path.exists() {
+                return Some(path.clone());
+            }
+        }
+    }
+
+    None
 }
 
 /// 初始化词典
 pub fn init_dictionary(app: &AppHandle) -> Result<(), String> {
-    let db_path = get_db_path(app);
-
-    if !db_path.exists() {
-        return Err(format!("Dictionary database not found: {:?}", db_path));
-    }
+    let db_path = get_db_path(app).ok_or("Dictionary database not found in any expected location")?;
+    crate::debug_log(&format!("[Dictionary] Using db path: {:?}", db_path));
 
     let state = app.state::<DictionaryState>();
     state
-        .init(db_path)
-        .map_err(|e| format!("Failed to open dictionary: {}", e))
+        .init(db_path.clone())
+        .map_err(|e| {
+            let err = format!("Failed to open dictionary: {}", e);
+            crate::debug_log(&format!("[Dictionary] {}", err));
+            err
+        })?;
+
+    crate::debug_log("[Dictionary] Successfully initialized");
+    Ok(())
 }
 
 /// Tauri command: 查询单词

@@ -88,15 +88,15 @@ impl LlmState {
 
     /// 查询 LLM
     pub async fn query(&self, word: &str) -> Result<String, String> {
-        log::info!("[LLM] Starting query for: {}", word);
+        crate::debug_log(&format!("[LLM] Starting query for: {}", word));
 
         let config = {
             let lock = self.config.lock().unwrap();
             lock.clone().ok_or("LLM not configured")?
         };
 
-        log::info!("[LLM] Config loaded - api_base: {}, model: {}, timeout: {}s",
-            config.api_base, config.model, config.timeout);
+        crate::debug_log(&format!("[LLM] Config loaded - api_base: {}, model: {}, timeout: {}s",
+            config.api_base, config.model, config.timeout));
 
         let prompt = format!(
             r#"请解释英语单词或短语 "{}"，返回 JSON 格式（不要包含 markdown 代码块标记）：
@@ -135,7 +135,7 @@ impl LlmState {
         };
 
         let url = format!("{}/chat/completions", config.api_base.trim_end_matches('/'));
-        log::info!("[LLM] Sending request to: {}", url);
+        crate::debug_log(&format!("[LLM] Sending request to: {}", url));
 
         let response = self.client
             .post(&url)
@@ -146,11 +146,11 @@ impl LlmState {
             .send()
             .await
             .map_err(|e| {
-                log::error!("[LLM] Request error: {:?}", e);
+                crate::debug_log(&format!("[LLM] Request error: {:?}", e));
                 format!("Request failed: {}", e)
             })?;
 
-        log::info!("[LLM] Response status: {}", response.status());
+        crate::debug_log(&format!("[LLM] Response status: {}", response.status()));
 
         if !response.status().is_success() {
             let status = response.status();
@@ -174,16 +174,29 @@ impl LlmState {
 /// 获取默认配置模板路径
 fn get_default_config_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     // 从资源目录获取模板
-    let resource_dir = app.path().resource_dir().ok()?;
-    let template_path = resource_dir.join("config.yaml.example");
-    if template_path.exists() {
-        return Some(template_path);
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let candidates = [
+            resource_dir.join("config.yaml.example"),
+            resource_dir.join("resources").join("config.yaml.example"),
+        ];
+        for path in &candidates {
+            if path.exists() {
+                return Some(path.clone());
+            }
+        }
     }
 
-    // 开发模式 fallback
-    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config.yaml.example");
-    if dev_path.exists() {
-        return Some(dev_path);
+    // 开发模式：检查当前工作目录
+    let dev_candidates = [
+        std::env::current_dir().ok().map(|p| p.join("src-tauri").join("config.yaml.example")),
+        std::env::current_dir().ok().map(|p| p.join("config.yaml.example")),
+    ];
+    for path_opt in &dev_candidates {
+        if let Some(path) = path_opt {
+            if path.exists() {
+                return Some(path.clone());
+            }
+        }
     }
 
     None
@@ -191,26 +204,32 @@ fn get_default_config_path(app: &tauri::AppHandle) -> Option<PathBuf> {
 
 /// 确保用户配置目录存在，如果配置不存在则复制模板
 fn ensure_config(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    // 获取用户配置路径
-    let config_dir = dirs::config_dir()
-        .ok_or("Cannot determine config directory")?
+    // 获取用户本地数据路径 (%LOCALAPPDATA%\Dictyy)
+    let config_dir = dirs::data_local_dir()
+        .ok_or("Cannot determine local data directory")?
         .join("Dictyy");
+
+    crate::debug_log(&format!("[LLM] Config dir: {:?}", config_dir));
 
     // 创建目录
     if !config_dir.exists() {
+        crate::debug_log("[LLM] Creating config dir...");
         fs::create_dir_all(&config_dir)
             .map_err(|e| format!("Failed to create config directory: {}", e))?;
     }
 
     let config_path = config_dir.join("config.yaml");
+    crate::debug_log(&format!("[LLM] Config path: {:?}, exists: {}", config_path, config_path.exists()));
 
     // 如果配置不存在，复制模板
     if !config_path.exists() {
         if let Some(template_path) = get_default_config_path(app) {
+            crate::debug_log(&format!("[LLM] Copying template from {:?}", template_path));
             fs::copy(&template_path, &config_path)
                 .map_err(|e| format!("Failed to copy config template: {}", e))?;
         } else {
             // 没有模板，创建默认配置
+            crate::debug_log("[LLM] No template found, creating default config");
             let default_config = r#"# Dictyy LLM 配置文件
 # 请填写您的 API 配置
 
@@ -232,17 +251,35 @@ llm:
 
 /// 初始化 LLM
 pub fn init_llm(app: &tauri::AppHandle) -> Result<(), String> {
-    // 先检查开发模式配置
-    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("config.yaml");
-    let config_path = if dev_path.exists() {
-        dev_path
+    crate::debug_log("[LLM] Initializing...");
+
+    // 开发模式：检查当前工作目录下的 config.yaml
+    let dev_path = std::env::current_dir()
+        .ok()
+        .map(|p| p.join("src-tauri").join("config.yaml"));
+
+    let config_path = if let Some(ref path) = dev_path {
+        if path.exists() {
+            crate::debug_log(&format!("[LLM] Using dev config: {:?}", path));
+            path.clone()
+        } else {
+            // 生产模式：确保用户配置存在
+            ensure_config(app)?
+        }
     } else {
-        // 生产模式：确保用户配置存在
         ensure_config(app)?
     };
 
+    crate::debug_log(&format!("[LLM] Using config: {:?}", config_path));
+
     let state = app.state::<LlmState>();
-    state.init(config_path)
+    state.init(config_path.clone()).map_err(|e| {
+        crate::debug_log(&format!("[LLM] Init failed: {}", e));
+        e
+    })?;
+
+    crate::debug_log("[LLM] Successfully initialized");
+    Ok(())
 }
 
 /// Tauri command: LLM 查询
