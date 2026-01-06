@@ -4,8 +4,12 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Loader2, X } from "lucide-react";
 import { WordResult } from "@/components/WordResult";
+import { CollinsResult } from "@/components/CollinsResult";
+import { EtymaResult } from "@/components/EtymaResult";
+import { Gpt4Result } from "@/components/Gpt4Result";
 import { SearchSuggestions } from "@/components/SearchSuggestions";
 import { useDebounce } from "@/hooks/useDebounce";
 import {
@@ -16,30 +20,45 @@ import {
   createLlmResult,
   searchWords,
   WordSuggestion,
-  getLlmConfig,
-  LlmConfigInfo,
+  lookupCollins,
+  lookupEtyma,
+  lookupGpt4,
+  parseCollinsContent,
+  parseEtymaContent,
+  CollinsContent,
+  EtymaContent,
 } from "@/services/dictionary";
+
+// Tab 类型
+type TabType = "main" | "collins" | "etyma" | "gpt4" | "llm";
 
 function App() {
   const [word, setWord] = useState("");
+  const [searchedWord, setSearchedWord] = useState(""); // 当前查询的单词
   const [isSearching, setIsSearching] = useState(false);
   const [isLlmLoading, setIsLlmLoading] = useState(false);
-  const [result, setResult] = useState<ParsedWordContent | null>(null);
-  const [notFound, setNotFound] = useState(false);
-  const [llmConfig, setLlmConfig] = useState<LlmConfigInfo | null>(null);
   const [appVersion, setAppVersion] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // 各数据源结果
+  const [mainResult, setMainResult] = useState<ParsedWordContent | null>(null);
+  const [collinsResult, setCollinsResult] = useState<CollinsContent | null>(null);
+  const [etymaResult, setEtymaResult] = useState<EtymaContent | null>(null);
+  const [gpt4Result, setGpt4Result] = useState<string | null>(null);
+  const [llmResult, setLlmResult] = useState<ParsedWordContent | null>(null);
+
+  // Tab 状态
+  const [activeTab, setActiveTab] = useState<TabType>("main");
+
   // 搜索建议相关状态
   const [suggestions, setSuggestions] = useState<WordSuggestion[]>([]);
-  const [selectedIndex, setSelectedIndex] = useState(-1); // -1 表示未选中任何项
+  const [selectedIndex, setSelectedIndex] = useState(-1);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const debouncedWord = useDebounce(word, 200);
 
   // Listen for new-query event from Rust
   useEffect(() => {
     const unlisten = listen("new-query", () => {
-      // Focus input when window is shown via shortcut
       inputRef.current?.focus();
       inputRef.current?.select();
     });
@@ -49,11 +68,8 @@ function App() {
     };
   }, []);
 
-  // 获取 LLM 配置和版本号
+  // 获取版本号
   useEffect(() => {
-    getLlmConfig()
-      .then(setLlmConfig)
-      .catch((err) => console.error("Failed to get LLM config:", err));
     getVersion()
       .then(setAppVersion)
       .catch((err) => console.error("Failed to get app version:", err));
@@ -61,13 +77,12 @@ function App() {
 
   // 搜索建议
   useEffect(() => {
-    // 正在查询中不显示建议
     if (isSearching || isLlmLoading) {
       return;
     }
 
-    // 如果有结果，且输入内容和结果单词相同或是其前缀，不显示建议
-    if (result && result.word.toLowerCase().startsWith(debouncedWord.toLowerCase())) {
+    // 如果已经搜索了这个词，不再显示建议
+    if (searchedWord && searchedWord.toLowerCase() === debouncedWord.toLowerCase()) {
       return;
     }
 
@@ -87,14 +102,11 @@ function App() {
         console.error("Search failed:", err);
         setSuggestions([]);
       });
-  }, [debouncedWord, isSearching, isLlmLoading, result]);
+  }, [debouncedWord, isSearching, isLlmLoading, searchedWord]);
 
   // 处理键盘事件
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     if (!showSuggestions) {
-      if (e.key === "Escape") {
-        getCurrentWindow().hide();
-      }
       return;
     }
 
@@ -117,12 +129,10 @@ function App() {
         }
         break;
       case "Enter":
-        // 只有选中了候选词才查询候选词，否则查询输入框内容
         if (selectedIndex >= 0 && suggestions.length > 0) {
           e.preventDefault();
           selectSuggestion(suggestions[selectedIndex].word);
         }
-        // 未选中时不阻止默认行为，让表单提交处理
         break;
       case "Escape":
         e.preventDefault();
@@ -131,7 +141,6 @@ function App() {
     }
   }
 
-  // 选择建议词并查询
   function selectSuggestion(selectedWord: string) {
     setWord(selectedWord);
     setShowSuggestions(false);
@@ -140,46 +149,130 @@ function App() {
 
   async function doSearch(searchWord: string) {
     if (!searchWord.trim()) {
-      // 清空结果，显示默认内容
-      setResult(null);
-      setNotFound(false);
+      clearResults();
       return;
     }
+
+    const trimmedWord = searchWord.trim();
+    setSearchedWord(trimmedWord);
     setIsSearching(true);
     setIsLlmLoading(false);
-    setNotFound(false);
-    setResult(null);
+    clearResults();
     setShowSuggestions(false);
-    setSuggestions([]); // 清空建议列表，防止重新显示
+    setSuggestions([]);
+
+    // 用于收集离线查询结果
+    let hasMainResult = false;
+    let hasCollinsResult = false;
+    let hasEtymaResult = false;
+    let hasGpt4Result = false;
+
+    // 并行查询所有离线数据源
+    const queries = [
+      // 主词典
+      lookupWord(trimmedWord).then((entry) => {
+        if (entry) {
+          setMainResult(parseWordContent(entry));
+          hasMainResult = true;
+        }
+      }).catch(e => console.error("lookupWord error:", e)),
+
+      // 柯林斯
+      lookupCollins(trimmedWord).then((entry) => {
+        if (entry) {
+          const parsed = parseCollinsContent(entry);
+          if (parsed) {
+            setCollinsResult(parsed);
+            hasCollinsResult = true;
+          }
+        }
+      }).catch(e => console.error("lookupCollins error:", e)),
+
+      // 词根词缀
+      lookupEtyma(trimmedWord).then((entry) => {
+        if (entry) {
+          const parsed = parseEtymaContent(entry);
+          if (parsed) {
+            setEtymaResult(parsed);
+            hasEtymaResult = true;
+          }
+        }
+      }).catch(e => console.error("lookupEtyma error:", e)),
+
+      // GPT4
+      lookupGpt4(trimmedWord).then((content) => {
+        if (content) {
+          setGpt4Result(content);
+          hasGpt4Result = true;
+        }
+      }).catch(e => console.error("lookupGpt4 error:", e)),
+    ];
 
     try {
-      const entry = await lookupWord(searchWord.trim());
-      if (entry) {
-        setResult(parseWordContent(entry));
-      } else {
-        // 离线词典找不到，尝试 LLM 回退
+      await Promise.all(queries);
+
+      // 如果离线词典都查不到，回退到 LLM
+      const hasOfflineResult = hasMainResult || hasCollinsResult || hasEtymaResult || hasGpt4Result;
+      if (!hasOfflineResult) {
         setIsSearching(false);
         setIsLlmLoading(true);
         try {
-          const llmContent = await llmQuery(searchWord.trim());
-          setResult(createLlmResult(searchWord.trim(), llmContent));
+          const llmContent = await llmQuery(trimmedWord);
+          setLlmResult(createLlmResult(trimmedWord, llmContent));
         } catch (llmError) {
           console.error("LLM query failed:", llmError);
-          setNotFound(true);
+        } finally {
+          setIsLlmLoading(false);
         }
       }
     } catch (error) {
-      console.error("Lookup failed:", error);
-      setNotFound(true);
+      console.error("Query failed:", error);
     } finally {
       setIsSearching(false);
       setIsLlmLoading(false);
     }
   }
 
-  async function handleSearch() {
-    doSearch(word);
+  function clearResults() {
+    setMainResult(null);
+    setCollinsResult(null);
+    setEtymaResult(null);
+    setGpt4Result(null);
+    setLlmResult(null);
+    // 注意：不要在这里清空 searchedWord
   }
+
+  // 判断是否有任何结果
+  const hasAnyResult = mainResult || collinsResult || etymaResult || gpt4Result || llmResult;
+
+  // 计算各 Tab 是否有内容
+  const tabHasContent = {
+    main: !!mainResult,
+    collins: !!collinsResult,
+    etyma: !!etymaResult,
+    gpt4: !!gpt4Result,
+    llm: !!llmResult,
+  };
+
+  // 获取第一个有内容的 Tab
+  const getFirstAvailableTab = (): TabType => {
+    if (mainResult) return "main";
+    if (collinsResult) return "collins";
+    if (etymaResult) return "etyma";
+    if (gpt4Result) return "gpt4";
+    if (llmResult) return "llm";
+    return "main";
+  };
+
+  // 当结果变化时，自动切换到第一个有内容的 Tab
+  useEffect(() => {
+    if (hasAnyResult) {
+      const firstTab = getFirstAvailableTab();
+      if (!tabHasContent[activeTab]) {
+        setActiveTab(firstTab);
+      }
+    }
+  }, [mainResult, collinsResult, etymaResult, gpt4Result, llmResult]);
 
   return (
     <div className="h-screen bg-background flex flex-col overflow-hidden">
@@ -205,7 +298,7 @@ function App() {
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            handleSearch();
+            doSearch(word);
           }}
           className="flex gap-2 flex-shrink-0"
         >
@@ -216,12 +309,11 @@ function App() {
               onChange={(e) => setWord(e.target.value)}
               onKeyDown={handleKeyDown}
               onFocus={() => {
-                if (suggestions.length > 0 && !result && !isSearching) {
+                if (suggestions.length > 0 && !mainResult && !isSearching) {
                   setShowSuggestions(true);
                 }
               }}
               onBlur={() => {
-                // 延迟关闭以允许点击建议
                 setTimeout(() => setShowSuggestions(false), 150);
               }}
               placeholder="输入单词或短语..."
@@ -240,23 +332,69 @@ function App() {
           </Button>
         </form>
 
-        <div className="mt-4 flex-1 overflow-y-auto">
+        <div className="mt-4 flex-1 overflow-hidden flex flex-col">
           {isSearching && (
             <p className="text-muted-foreground text-sm">查询中...</p>
           )}
+
           {isLlmLoading && (
             <p className="text-muted-foreground text-sm flex items-center gap-2">
               <Loader2 className="h-4 w-4 animate-spin" />
               词典未收录，正在请求 LLM...
             </p>
           )}
-          {notFound && (
+
+          {!isSearching && !isLlmLoading && searchedWord && !hasAnyResult && (
             <p className="text-muted-foreground text-sm">
-              未找到: "{word}"
+              未找到: "{searchedWord}"
             </p>
           )}
-          {result && <WordResult word={result} />}
-          {!result && !notFound && !isSearching && !isLlmLoading && (
+
+          {!isSearching && !isLlmLoading && hasAnyResult && (
+            <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as TabType)} className="flex-1 flex flex-col overflow-hidden">
+              <TabsList className="w-full justify-start flex-shrink-0">
+                {tabHasContent.main && (
+                  <TabsTrigger value="main">主词典</TabsTrigger>
+                )}
+                {tabHasContent.collins && (
+                  <TabsTrigger value="collins">柯林斯</TabsTrigger>
+                )}
+                {tabHasContent.etyma && (
+                  <TabsTrigger value="etyma">词根词缀</TabsTrigger>
+                )}
+                {tabHasContent.gpt4 && (
+                  <TabsTrigger value="gpt4">GPT4</TabsTrigger>
+                )}
+                {tabHasContent.llm && (
+                  <TabsTrigger value="llm">LLM</TabsTrigger>
+                )}
+              </TabsList>
+
+              <div className="flex-1 overflow-y-auto mt-4">
+                <TabsContent value="main" className="mt-0">
+                  {mainResult && <WordResult word={mainResult} />}
+                </TabsContent>
+
+                <TabsContent value="collins" className="mt-0">
+                  {collinsResult && <CollinsResult content={collinsResult} />}
+                </TabsContent>
+
+                <TabsContent value="etyma" className="mt-0">
+                  {etymaResult && <EtymaResult content={etymaResult} />}
+                </TabsContent>
+
+                <TabsContent value="gpt4" className="mt-0">
+                  {gpt4Result && <Gpt4Result content={gpt4Result} />}
+                </TabsContent>
+
+                <TabsContent value="llm" className="mt-0">
+                  {llmResult && <WordResult word={llmResult} />}
+                </TabsContent>
+              </div>
+            </Tabs>
+          )}
+
+          {!searchedWord && !isSearching && (
             <div className="h-full flex flex-col items-center justify-center text-muted-foreground/50">
               <div className="text-4xl mb-2">📖</div>
               <p className="text-sm">查询单词或短语</p>
@@ -267,16 +405,10 @@ function App() {
 
       {/* Status Bar */}
       <div className="px-3 py-1 border-t bg-muted/30 text-xs text-muted-foreground flex justify-between">
-        <div className="truncate">
-          {llmConfig?.configured ? (
-            <span>{llmConfig.api_base} | {llmConfig.model}</span>
-          ) : (
-            <span className="text-yellow-600">LLM 未配置</span>
-          )}
+        <div>
+          <kbd className="px-1 py-0.5 bg-muted rounded">Ctrl+`</kbd> 隐藏
         </div>
-        <div className="flex gap-3 shrink-0 items-center">
-          <span><kbd className="px-1 py-0.5 bg-muted rounded">Ctrl+`</kbd> 显示/隐藏</span>
-          <span><kbd className="px-1 py-0.5 bg-muted rounded">Esc</kbd> 隐藏</span>
+        <div className="shrink-0">
           {appVersion && <span className="text-muted-foreground/60">v{appVersion}</span>}
         </div>
       </div>

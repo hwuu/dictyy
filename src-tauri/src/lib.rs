@@ -42,6 +42,9 @@ pub fn run() {
             shortcuts::setup_shortcuts,
             dictionary::lookup_word,
             dictionary::search_words,
+            dictionary::lookup_collins,
+            dictionary::lookup_etyma,
+            dictionary::lookup_gpt4,
             llm::llm_query,
             llm::get_llm_config
         ])
@@ -85,11 +88,11 @@ pub fn run() {
 
             // Setup window close interception - hide instead of close
             if let Some(window) = app.get_webview_window("main") {
-                // Set window size to 2/3 of screen and center it
+                // Set window size: 2/3 of screen width, 3/4 of screen height
                 if let Some(monitor) = window.current_monitor().ok().flatten() {
                     let screen_size = monitor.size();
                     let width = (screen_size.width as f64 * 2.0 / 3.0) as u32;
-                    let height = (screen_size.height as f64 * 2.0 / 3.0) as u32;
+                    let height = (screen_size.height as f64 * 3.0 / 4.0) as u32;
                     let x = ((screen_size.width - width) / 2) as i32;
                     let y = ((screen_size.height - height) / 2) as i32;
 

@@ -97,7 +97,6 @@ export function WordResult({ word }: WordResultProps) {
   if (word.sentences.length > 0) defaultOpenItems.push("sentences");
   if (word.phrases.length > 0) defaultOpenItems.push("phrases");
   if (word.rememberMethod) defaultOpenItems.push("remember");
-  if (word.gpt4Content) defaultOpenItems.push("gpt4");
 
   return (
     <div className="space-y-3">
@@ -182,21 +181,6 @@ export function WordResult({ word }: WordResultProps) {
           </AccordionItem>
         )}
 
-        {/* GPT4 解释 */}
-        {word.gpt4Content && (
-          <AccordionItem value="gpt4">
-            <AccordionTrigger className="text-sm py-2">
-              GPT4 解析
-            </AccordionTrigger>
-            <AccordionContent>
-              <div className="text-sm markdown-content">
-                <ReactMarkdown components={markdownComponents}>
-                  {word.gpt4Content}
-                </ReactMarkdown>
-              </div>
-            </AccordionContent>
-          </AccordionItem>
-        )}
       </Accordion>
     </div>
   );

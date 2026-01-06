@@ -18,6 +18,45 @@ export interface WordSuggestion {
   brief: string;
 }
 
+/** MDX 词典条目 */
+export interface MdxEntry {
+  word: string;
+  content: string;
+  is_link: boolean;
+  link_target: string | null;
+}
+
+/** 柯林斯词典解析后内容 */
+export interface CollinsContent {
+  word: string;
+  phonetic_uk: string;
+  phonetic_us: string;
+  frequency: number;
+  forms: string[];
+  definitions: CollinsDefinition[];
+}
+
+export interface CollinsDefinition {
+  num: string;
+  pos: string;
+  cn: string;
+  en: string;
+  examples: { en: string; cn: string }[];
+  synonyms: string[];
+}
+
+/** 词根词缀词典解析后内容 */
+export interface EtymaContent {
+  word: string;
+  pos: string;
+  meaning: string;
+  etymology: string;
+  frequency: number;
+  stars: number;
+  root: string;
+  related: { word: string; brief: string }[];
+}
+
 /** 解析后的单词内容 */
 export interface ParsedWordContent {
   word: string;
@@ -68,6 +107,41 @@ export async function lookupWord(word: string): Promise<WordEntry | null> {
 /** 搜索单词（模糊匹配） */
 export async function searchWords(query: string): Promise<WordSuggestion[]> {
   return invoke<WordSuggestion[]>("search_words", { query });
+}
+
+/** 查询柯林斯词典 */
+export async function lookupCollins(word: string): Promise<MdxEntry | null> {
+  return invoke<MdxEntry | null>("lookup_collins", { word });
+}
+
+/** 查询词根词缀词典 */
+export async function lookupEtyma(word: string): Promise<MdxEntry | null> {
+  return invoke<MdxEntry | null>("lookup_etyma", { word });
+}
+
+/** 查询 GPT4 词典 */
+export async function lookupGpt4(word: string): Promise<string | null> {
+  return invoke<string | null>("lookup_gpt4", { word });
+}
+
+/** 解析柯林斯词典内容 */
+export function parseCollinsContent(entry: MdxEntry): CollinsContent | null {
+  if (entry.is_link || !entry.content) return null;
+  try {
+    return JSON.parse(entry.content) as CollinsContent;
+  } catch {
+    return null;
+  }
+}
+
+/** 解析词根词缀词典内容 */
+export function parseEtymaContent(entry: MdxEntry): EtymaContent | null {
+  if (entry.is_link || !entry.content) return null;
+  try {
+    return JSON.parse(entry.content) as EtymaContent;
+  } catch {
+    return null;
+  }
 }
 
 /** LLM 查询 */

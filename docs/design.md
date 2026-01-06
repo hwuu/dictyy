@@ -2,7 +2,7 @@
 
 ## 概述
 
-一个运行在 Windows 11 上的轻量级字典应用。常驻系统托盘，通过全局快捷键快速唤出，输入单词后调用大模型获取释义。
+一个运行在 Windows 11 上的轻量级字典应用。常驻系统托盘，通过全局快捷键快速唤出，输入单词后查询多个词典数据源，未找到时调用大模型获取释义。
 
 ## 技术栈
 
@@ -15,6 +15,7 @@
 | 组件库 | shadcn/ui | 基于 Radix UI 的高质量组件 |
 | 状态管理 | Jotai | 轻量级原子状态管理 |
 | LLM | OpenAI 兼容 API | 前端直接调用 |
+| 数据库 | SQLite | 存储词典数据 |
 
 > 参考项目：[Aictionary](C:\Users\hwuu\dev\github\ahpxex\Aictionary)
 
@@ -43,41 +44,59 @@
 - 极简设计：一个输入框 + 结果展示区
 - 输入单词后按 Enter 或点击按钮查询
 - 支持流式输出（streaming）显示 LLM 响应
-- 按 Esc 隐藏窗口
 - **窗口动画**：弹出时淡入 + 滑入效果
+- **动态尺寸**：宽度为屏幕的 2/3，高度为屏幕的 3/4，居中显示
 
-### 4. 查询逻辑（双层架构）
+### 4. 查询逻辑（多数据源架构）
 
 ```
-用户输入单词
-    ↓
-查询离线词典
-    ↓
-┌─────────────────┐
-│  找到？         │
-│  Yes → 显示结果 │
-│  No  → 调用 LLM │
-└─────────────────┘
-    ↓ (LLM)
-显示结果 + 缓存到本地
+User Input
+    |
+    v
++-------------------+
+| Query all sources |
+| in parallel       |
++-------------------+
+    |
+    +---> Main Dict (有道)
+    +---> Collins Dict
+    +---> Etyma Dict
+    +---> GPT4 Cache
+    |
+    v
++-------------------+
+| Any result found? |
+| Yes -> Show tabs  |
+| No  -> Query LLM  |
++-------------------+
+    |
+    v
+Display result + Cache
 ```
 
 ### 5. 离线词典
-- 数据来源：[kajweb/dict](C:\Users\hwuu\dev\github\kajweb\dict)（有道词典数据）
-- 推荐词库：CET4 + CET6（约 5000+ 词，3-5 MB）
-- 数据格式：JSON（包含音标、释义、例句、近义词等）
-- 存储：应用数据目录，首次启动时解压
+
+#### 数据来源
+
+| 词典 | 来源 | 说明 |
+|------|------|------|
+| 主词典 | [kajweb/dict](https://github.com/kajweb/dict) | 有道词典数据，含音标、释义、例句、近义词 |
+| 柯林斯 | 柯林斯英汉双解词典 MDX | 权威释义，含词频、词性、例句 |
+| 词根词缀 | 英语词根词缀词频 MDX | 词源解析、相关词汇 |
+| GPT4 缓存 | 自建 | 历史 LLM 查询结果缓存 |
 
 ### 6. LLM 集成
 - 调用 OpenAI 兼容 API（支持自定义 endpoint）
 - 前端直接调用（`dangerouslyAllowBrowser: true`）
 - 配置项：API Key、Base URL、Model
 - Prompt 设计：针对单词释义优化，结构化输出
+- 仅在所有离线词典都未找到时触发
 
-### 7. 历史记录
-- 保存查询过的单词（最近 500 条）
-- 可在设置中查看/清除历史
-- 使用 Jotai `atomWithStorage` 持久化
+### 7. 搜索建议
+- 输入时实时显示搜索建议
+- 查询所有词典（主词典、柯林斯、词根词缀）
+- 显示词条简要信息
+- 键盘导航（上下箭头、Tab 补全、Enter 选择）
 
 ### 8. 多语言支持
 - 英→中（默认）
@@ -88,213 +107,172 @@
 ## 架构
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Tauri App                                              │
-│                                                         │
-│  ┌───────────────────────────────────────────────────┐  │
-│  │  Frontend (React + TypeScript)                    │  │
-│  │                                                   │  │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌──────────┐  │  │
-│  │  │ SearchInput │  │ ResultView  │  │ Settings │  │  │
-│  │  └─────────────┘  └─────────────┘  └──────────┘  │  │
-│  │                                                   │  │
-│  │  ┌─────────────────────────────────────────────┐  │  │
-│  │  │  Services                                   │  │  │
-│  │  │  - llm.ts        (LLM API 调用)            │  │  │
-│  │  │  - dictionary.ts (离线词典查询)            │  │  │
-│  │  │  - history.ts    (历史记录管理)            │  │  │
-│  │  └─────────────────────────────────────────────┘  │  │
-│  │                                                   │  │
-│  │  ┌─────────────────────────────────────────────┐  │  │
-│  │  │  State (Jotai)                              │  │  │
-│  │  │  - settingsAtom   (配置)                   │  │  │
-│  │  │  - historyAtom    (历史记录)               │  │  │
-│  │  │  - resultAtom     (查询结果)               │  │  │
-│  │  └─────────────────────────────────────────────┘  │  │
-│  └───────────────────────────────────────────────────┘  │
-│                                                         │
-│  ┌───────────────────────────────────────────────────┐  │
-│  │  Backend (Rust)                                   │  │
-│  │  - tray.rs       系统托盘管理                     │  │
-│  │  - shortcuts.rs  全局快捷键注册                   │  │
-│  │  - dictionary.rs 离线词典文件读取                 │  │
-│  │  - window.rs     窗口显示/隐藏/动画               │  │
-│  └───────────────────────────────────────────────────┘  │
-│                                                         │
-│  ┌───────────────────────────────────────────────────┐  │
-│  │  Data                                             │  │
-│  │  - dictionaries/   离线词典 JSON 文件             │  │
-│  │  - config.json     用户配置                       │  │
-│  └───────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
++-----------------------------------------------------------+
+|  Tauri App                                                 |
+|                                                            |
+|  +------------------------------------------------------+  |
+|  |  Frontend (React + TypeScript)                       |  |
+|  |                                                      |  |
+|  |  +-------------+  +---------------+  +------------+  |  |
+|  |  | SearchInput |  | Tab Results   |  | Settings   |  |  |
+|  |  +-------------+  +---------------+  +------------+  |  |
+|  |                   | - Main Dict   |                  |  |
+|  |                   | - Collins     |                  |  |
+|  |                   | - Etyma       |                  |  |
+|  |                   | - GPT4 Cache  |                  |  |
+|  |                   | - LLM         |                  |  |
+|  |                   +---------------+                  |  |
+|  |                                                      |  |
+|  |  +------------------------------------------------+  |  |
+|  |  |  Services                                      |  |  |
+|  |  |  - llm.ts        (LLM API call)               |  |  |
+|  |  |  - dictionary.ts (Dictionary lookup)          |  |  |
+|  |  +------------------------------------------------+  |  |
+|  +------------------------------------------------------+  |
+|                                                            |
+|  +------------------------------------------------------+  |
+|  |  Backend (Rust)                                      |  |
+|  |  - tray.rs       System tray                         |  |
+|  |  - shortcuts.rs  Global shortcuts                    |  |
+|  |  - dictionary.rs SQLite dictionary queries           |  |
+|  |  - llm.rs        LLM config management               |  |
+|  +------------------------------------------------------+  |
+|                                                            |
+|  +------------------------------------------------------+  |
+|  |  Data (SQLite: dict.db)                              |  |
+|  |  - words         Main dictionary                     |  |
+|  |  - collins_words Collins dictionary                  |  |
+|  |  - etyma_words   Etymology dictionary                |  |
+|  |  - gpt4_words    GPT4 cache                          |  |
+|  +------------------------------------------------------+  |
++-----------------------------------------------------------+
 ```
 
 ## 窗口设计
 
 ```
-┌──────────────────────────────────────┐
-│  ┌────────────────────────────┐  🔍  │
-│  │ 输入单词...                 │      │
-│  └────────────────────────────┘      │
-├──────────────────────────────────────┤
-│                                      │
-│  ephemeral                     🔊    │
-│  /ɪˈfem(ə)rəl/                       │
-│                                      │
-│  adj. 短暂的；朝生暮死的              │
-│                                      │
-│  例句：                               │
-│  Fame is ephemeral.                  │
-│  名声是短暂的。                       │
-│                                      │
-│  近义词：transient, fleeting         │
-│                                      │
-│  ───────────────────────────── 📖   │
-│  来源: 离线词典 | LLM                 │
-└──────────────────────────────────────┘
++--------------------------------------+
+|  +----------------------------+  X   |  <- Caption bar (draggable)
+|  | Input word...              |      |
+|  +----------------------------+      |
++--------------------------------------+
+| [Main] [Collins] [Etyma] [GPT4]      |  <- Tab switcher
++--------------------------------------+
+|                                      |
+|  ephemeral                     [VOL] |
+|  /ifem(e)rel/                        |
+|                                      |
+|  adj. Short-lived; transient         |
+|                                      |
+|  Examples:                           |
+|  Fame is ephemeral.                  |
+|  ...                                 |
+|                                      |
++--------------------------------------+
+| Ctrl+\` Hide              v0.2.0     |  <- Status bar
++--------------------------------------+
 
-尺寸：400 x 350 px（可调整）
-位置：屏幕中央
-样式：无边框、圆角(10px)、阴影
-动画：淡入(150ms) + 向上滑入(8px)
+Size: 2/3 screen width x 3/4 screen height
+Position: Center of screen
+Style: No border, rounded corners, shadow
+Animation: Fade in (150ms) + slide up (8px)
 ```
 
-## 离线词典数据
+## 数据库结构
 
-### 数据来源
+SQLite 数据库 `dict.db` 包含以下表：
 
-来自 [kajweb/dict](C:\Users\hwuu\dev\github\kajweb\dict)，有道词典数据。
-
-### 推荐词库
-
-| 词库 | 单词数 | 大小 | 用途 |
-|------|--------|------|------|
-| CET4_3 | ~3,700 | 2.7 MB | 四级核心词汇 |
-| CET6_3 | ~2,000 | 1.4 MB | 六级核心词汇 |
-| TOEFL_3 | ~9,200 | 4.3 MB | 托福词汇 |
-| IELTS_3 | ~3,500 | 1.6 MB | 雅思词汇 |
-| GRE_3 | ~7,200 | 2.5 MB | GRE 词汇 |
-| GMAT_3 | ~3,000 | 1.3 MB | GMAT 词汇 |
-
-**总计**：约 28,600 词，约 14 MB（去重后更少）
-
-### 数据格式示例
-
-```json
-{
-  "wordRank": 1,
-  "headWord": "cancel",
-  "content": {
-    "word": {
-      "content": {
-        "usphone": "'kænsl",
-        "ukphone": "'kænsl",
-        "trans": [
-          {
-            "pos": "vt",
-            "tranCn": "取消，撤销；删去",
-            "tranOther": "to decide that something will not happen"
-          }
-        ],
-        "sentence": {
-          "sentences": [
-            {
-              "sContent": "Our flight was cancelled.",
-              "sCn": "我们的航班取消了。"
-            }
-          ]
-        },
-        "syno": {
-          "synos": [
-            {
-              "pos": "vt",
-              "hwds": [{"w": "recall"}, {"w": "call it off"}]
-            }
-          ]
-        }
-      }
-    }
-  }
-}
+### words 表（主词典）
+```sql
+CREATE TABLE words (
+    id INTEGER PRIMARY KEY,
+    word TEXT NOT NULL,
+    content TEXT NOT NULL  -- JSON 格式的词条内容
+);
 ```
 
-### 存储策略
+### collins_words 表（柯林斯词典）
+```sql
+CREATE TABLE collins_words (
+    id INTEGER PRIMARY KEY,
+    word TEXT NOT NULL,
+    content TEXT NOT NULL,  -- JSON 格式
+    is_link INTEGER DEFAULT 0,
+    link_target TEXT
+);
+```
 
-由于原始数据较大（71 MB 全部），不放入 Git：
-1. 选择 CET4 + CET6 词库（约 5 MB）
-2. 构建时打包进应用资源
-3. 或首次启动时从远程下载
+### etyma_words 表（词根词缀词典）
+```sql
+CREATE TABLE etyma_words (
+    id INTEGER PRIMARY KEY,
+    word TEXT NOT NULL,
+    content TEXT NOT NULL,  -- JSON 格式
+    is_link INTEGER DEFAULT 0,
+    link_target TEXT
+);
+```
+
+### gpt4_words 表（GPT4 缓存）
+```sql
+CREATE TABLE gpt4_words (
+    id INTEGER PRIMARY KEY,
+    word TEXT NOT NULL UNIQUE,
+    content TEXT NOT NULL  -- Markdown 格式
+);
+```
 
 ## 配置项
 
-存储在本地（使用 tauri-plugin-store）：
+配置文件 `config.yaml` 存储在用户数据目录：
+- Windows: `%LOCALAPPDATA%\Dictyy\config.yaml`
 
-```json
-{
-  "llm": {
-    "apiKey": "sk-xxx",
-    "baseUrl": "https://api.openai.com/v1",
-    "model": "gpt-4o-mini"
-  },
-  "hotkey": "Ctrl+`",
-  "window": {
-    "width": 400,
-    "height": 350
-  },
-  "dictionary": {
-    "preferOffline": true,
-    "autoDetectLanguage": true
-  }
-}
+```yaml
+llm:
+  api_key: "sk-xxx"
+  api_base: "https://api.openai.com/v1"
+  model: "gpt-4o-mini"
 ```
 
 ## 目录结构
 
 ```
 dictyy/
-├── docs/
-│   └── design.md
-├── src/                        # 前端源码
-│   ├── app/
-│   │   ├── App.tsx
-│   │   ├── providers.tsx       # Jotai Provider
-│   │   └── system-sync.tsx     # 系统设置同步
-│   ├── components/
-│   │   ├── SearchInput.tsx
-│   │   ├── ResultView.tsx
-│   │   ├── HistoryList.tsx
-│   │   └── Settings.tsx
-│   ├── services/
-│   │   ├── llm.ts              # LLM API 调用
-│   │   ├── dictionary.ts       # 离线词典查询
-│   │   └── history.ts          # 历史记录
-│   ├── state/
-│   │   ├── settings.ts         # 设置状态
-│   │   ├── history.ts          # 历史状态
-│   │   └── result.ts           # 查询结果状态
-│   ├── hooks/
-│   │   ├── useSearch.ts        # 查询逻辑
-│   │   └── useGlobalShortcuts.ts
-│   ├── main.tsx
-│   └── index.css
-├── src-tauri/                  # Rust 后端
-│   ├── src/
-│   │   ├── main.rs
-│   │   ├── lib.rs
-│   │   ├── tray.rs             # 系统托盘
-│   │   ├── shortcuts.rs        # 快捷键
-│   │   └── dictionary.rs       # 词典文件读取
-│   ├── Cargo.toml
-│   └── tauri.conf.json
-├── dictionaries/               # 离线词典数据（不入 Git）
-│   ├── CET4_3.json
-│   └── CET6_3.json
-├── package.json
-├── vite.config.ts
-├── tailwind.config.js
-├── tsconfig.json
-├── .gitignore
-└── CLAUDE.md
++-- docs/
+|   +-- design.md
++-- scripts/
+|   +-- import_mdx.py         # MDX dictionary importer
+|   +-- sync-version.cjs      # Version sync script
++-- src/                      # Frontend
+|   +-- components/
+|   |   +-- ui/               # shadcn/ui components
+|   |   +-- WordResult.tsx
+|   |   +-- CollinsResult.tsx
+|   |   +-- EtymaResult.tsx
+|   |   +-- Gpt4Result.tsx
+|   |   +-- SearchSuggestions.tsx
+|   +-- hooks/
+|   |   +-- useDebounce.ts
+|   +-- services/
+|   |   +-- dictionary.ts     # Dictionary API
+|   +-- App.tsx
+|   +-- main.tsx
+|   +-- index.css
++-- src-tauri/                # Rust backend
+|   +-- src/
+|   |   +-- main.rs
+|   |   +-- lib.rs
+|   |   +-- tray.rs           # System tray
+|   |   +-- shortcuts.rs      # Global shortcuts
+|   |   +-- dictionary.rs     # SQLite queries
+|   |   +-- llm.rs            # LLM config
+|   +-- resources/
+|   |   +-- dict.db           # SQLite dictionary
+|   +-- Cargo.toml
+|   +-- tauri.conf.json
++-- package.json
++-- VERSION
++-- CLAUDE.md
 ```
 
 ## Tauri 插件
@@ -302,63 +280,19 @@ dictyy/
 ```toml
 # Cargo.toml
 [dependencies]
-tauri-plugin-store = "2"           # 配置持久化
-tauri-plugin-global-shortcut = "2" # 全局快捷键
-tauri-plugin-single-instance = "2" # 单实例模式
-```
-
-## 事件流
-
-### 快捷键触发查询窗口
-
-```
-用户按下 Ctrl+`
-    ↓
-Rust: shortcuts.rs 捕获快捷键
-    ↓
-Rust: emit("toggle-window")
-    ↓
-Frontend: listen("toggle-window")
-    ↓
-显示/隐藏窗口 + 聚焦输入框
-```
-
-### 单词查询流程
-
-```
-用户输入 + 按 Enter
-    ↓
-Frontend: useSearch hook
-    ↓
-invoke("query_dictionary", { word })
-    ↓
-Rust: 读取本地 JSON 词典
-    ↓
-┌─────────────────────┐
-│ 找到？              │
-│ Yes → 返回结果      │
-│ No  → 返回 null     │
-└─────────────────────┘
-    ↓
-Frontend: 如果 null，调用 LLM
-    ↓
-显示结果 + 更新历史记录
+tauri-plugin-store = "2"           # Config persistence
+tauri-plugin-global-shortcut = "2" # Global shortcuts
+tauri-plugin-single-instance = "2" # Single instance
+tauri-plugin-clipboard-manager = "2" # Clipboard
 ```
 
 ## 功能确认
 
-- [x] 历史记录功能
-- [x] 英→中 / 中→英 双向查询
-- [x] 离线词典作为 fallback
+- [x] 系统托盘 + 全局快捷键
+- [x] 多词典查询（主词典、柯林斯、词根词缀、GPT4 缓存）
+- [x] Tab 切换多数据源结果
+- [x] 搜索建议（查询所有词典）
+- [x] LLM fallback（所有词典未找到时）
 - [x] 窗口弹出动画
-- [ ] ~~暗色主题~~ (不需要)
-
-## 下一步
-
-1. 初始化 Tauri 项目
-2. 实现系统托盘 + 快捷键
-3. 实现基础 UI（输入框 + 结果展示）
-4. 集成离线词典
-5. 集成 LLM 调用
-6. 添加历史记录
-7. 窗口动画优化
+- [x] 动态窗口尺寸（2/3 x 3/4 屏幕）
+- [x] 窗口关闭改为隐藏到托盘

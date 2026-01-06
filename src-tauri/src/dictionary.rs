@@ -25,6 +25,15 @@ pub struct WordSuggestion {
     pub brief: String, // 简短释义
 }
 
+/// MDX 词典查询结果
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MdxEntry {
+    pub word: String,
+    pub content: String,  // JSON 格式的内容
+    pub is_link: bool,
+    pub link_target: Option<String>,
+}
+
 /// 词典状态管理
 pub struct DictionaryState {
     conn: Mutex<Option<Connection>>,
@@ -92,7 +101,7 @@ impl DictionaryState {
         }
     }
 
-    /// 搜索单词（模糊匹配）
+    /// 搜索单词（模糊匹配）- 查询所有词典
     pub fn search(&self, query: &str, limit: usize) -> SqliteResult<Vec<WordSuggestion>> {
         let lock = self.conn.lock().unwrap();
         let conn = match lock.as_ref() {
@@ -101,37 +110,106 @@ impl DictionaryState {
         };
 
         let query_lower = query.to_lowercase();
-
-        // 查询前缀匹配的单词
-        let mut stmt = conn.prepare(
-            "SELECT word, content FROM words
-             WHERE LOWER(word) LIKE ?1
-             ORDER BY LENGTH(word) ASC
-             LIMIT 50"
-        )?;
-
         let pattern = format!("{}%", query_lower);
-        // (word, content, is_prefix, distance)
-        let mut candidates: Vec<(String, String, bool, usize)> = stmt
-            .query_map([&pattern], |row| {
-                let word: String = row.get(0)?;
-                let content: String = row.get(1)?;
-                Ok((word, content))
-            })?
-            .filter_map(|r| r.ok())
-            .map(|(word, content)| {
-                let distance = levenshtein(&query_lower, &word.to_lowercase());
-                (word, content, true, distance) // true = 前缀匹配
-            })
-            .collect();
 
-        // 如果前缀匹配结果不足，再查询编辑距离相近的词
+        // (word, brief, is_prefix, distance) - 收集所有词典的结果
+        let mut candidates: Vec<(String, String, bool, usize)> = Vec::new();
+        let mut seen_words: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // 1. 查询主词典 (words)
+        {
+            let mut stmt = conn.prepare(
+                "SELECT word, content FROM words
+                 WHERE LOWER(word) LIKE ?1
+                 ORDER BY LENGTH(word) ASC
+                 LIMIT 30"
+            )?;
+
+            let results: Vec<(String, String)> = stmt
+                .query_map([&pattern], |row| {
+                    let word: String = row.get(0)?;
+                    let content: String = row.get(1)?;
+                    Ok((word, content))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            for (word, content) in results {
+                let word_lower = word.to_lowercase();
+                if !seen_words.contains(&word_lower) {
+                    let distance = levenshtein(&query_lower, &word_lower);
+                    let brief = extract_brief(&content);
+                    candidates.push((word.clone(), brief, true, distance));
+                    seen_words.insert(word_lower);
+                }
+            }
+        }
+
+        // 2. 查询柯林斯词典 (collins_words)
+        {
+            let mut stmt = conn.prepare(
+                "SELECT word, content FROM collins_words
+                 WHERE LOWER(word) LIKE ?1 AND is_link = 0
+                 ORDER BY LENGTH(word) ASC
+                 LIMIT 20"
+            )?;
+
+            let results: Vec<(String, String)> = stmt
+                .query_map([&pattern], |row| {
+                    let word: String = row.get(0)?;
+                    let content: String = row.get(1)?;
+                    Ok((word, content))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            for (word, content) in results {
+                let word_lower = word.to_lowercase();
+                if !seen_words.contains(&word_lower) {
+                    let distance = levenshtein(&query_lower, &word_lower);
+                    let brief = extract_collins_brief(&content);
+                    candidates.push((word.clone(), brief, true, distance));
+                    seen_words.insert(word_lower);
+                }
+            }
+        }
+
+        // 3. 查询词根词缀词典 (etyma_words)
+        {
+            let mut stmt = conn.prepare(
+                "SELECT word, content FROM etyma_words
+                 WHERE LOWER(word) LIKE ?1 AND is_link = 0
+                 ORDER BY LENGTH(word) ASC
+                 LIMIT 10"
+            )?;
+
+            let results: Vec<(String, String)> = stmt
+                .query_map([&pattern], |row| {
+                    let word: String = row.get(0)?;
+                    let content: String = row.get(1)?;
+                    Ok((word, content))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            for (word, content) in results {
+                let word_lower = word.to_lowercase();
+                if !seen_words.contains(&word_lower) {
+                    let distance = levenshtein(&query_lower, &word_lower);
+                    let brief = extract_etyma_brief(&content);
+                    candidates.push((word.clone(), brief, true, distance));
+                    seen_words.insert(word_lower);
+                }
+            }
+        }
+
+        // 4. 如果前缀匹配结果不足，从主词典补充编辑距离相近的词
         if candidates.len() < limit {
             let mut stmt2 = conn.prepare(
                 "SELECT word, content FROM words
                  WHERE LOWER(word) NOT LIKE ?1
                  AND LENGTH(word) BETWEEN ?2 AND ?3
-                 LIMIT 100"
+                 LIMIT 50"
             )?;
 
             let min_len = query.len().saturating_sub(1);
@@ -144,11 +222,19 @@ impl DictionaryState {
                     Ok((word, content))
                 })?
                 .filter_map(|r| r.ok())
-                .map(|(word, content)| {
-                    let distance = levenshtein(&query_lower, &word.to_lowercase());
-                    (word, content, false, distance) // false = 非前缀匹配
+                .filter_map(|(word, content)| {
+                    let word_lower = word.to_lowercase();
+                    if seen_words.contains(&word_lower) {
+                        return None;
+                    }
+                    let distance = levenshtein(&query_lower, &word_lower);
+                    if distance <= 2 {
+                        let brief = extract_brief(&content);
+                        Some((word, brief, false, distance))
+                    } else {
+                        None
+                    }
                 })
-                .filter(|(_, _, _, distance)| *distance <= 2) // 更严格：编辑距离 <= 2
                 .collect();
 
             candidates.extend(additional);
@@ -156,25 +242,94 @@ impl DictionaryState {
 
         // 排序：前缀匹配优先，然后按编辑距离
         candidates.sort_by(|a, b| {
-            // 前缀匹配优先（true > false，所以反过来比较）
             match (a.2, b.2) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
-                _ => a.3.cmp(&b.3), // 同类型按编辑距离排序
+                _ => a.3.cmp(&b.3),
             }
         });
 
-        // 提取简短释义并返回
+        // 返回结果
         let results: Vec<WordSuggestion> = candidates
             .into_iter()
             .take(limit)
-            .map(|(word, content, _, _)| {
-                let brief = extract_brief(&content);
-                WordSuggestion { word, brief }
-            })
+            .map(|(word, brief, _, _)| WordSuggestion { word, brief })
             .collect();
 
         Ok(results)
+    }
+
+    /// 查询柯林斯词典（支持 link 递归解析）
+    pub fn lookup_collins(&self, word: &str) -> SqliteResult<Option<MdxEntry>> {
+        self.lookup_mdx_table("collins_words", word, 5)
+    }
+
+    /// 查询词根词缀词典（支持 link 递归解析）
+    pub fn lookup_etyma(&self, word: &str) -> SqliteResult<Option<MdxEntry>> {
+        self.lookup_mdx_table("etyma_words", word, 5)
+    }
+
+    /// 通用 MDX 表查询（支持 link 递归解析）
+    fn lookup_mdx_table(&self, table: &str, word: &str, max_depth: u32) -> SqliteResult<Option<MdxEntry>> {
+        let lock = self.conn.lock().unwrap();
+        let conn = match lock.as_ref() {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+
+        let mut current_word = word.to_string();
+        let mut depth = 0;
+
+        loop {
+            let query = format!(
+                "SELECT word, content, is_link, link_target FROM {} WHERE LOWER(word) = LOWER(?1)",
+                table
+            );
+            let mut stmt = conn.prepare(&query)?;
+
+            let result = stmt.query_row([&current_word], |row| {
+                Ok(MdxEntry {
+                    word: row.get(0)?,
+                    content: row.get(1)?,
+                    is_link: row.get::<_, i32>(2)? != 0,
+                    link_target: row.get(3)?,
+                })
+            });
+
+            match result {
+                Ok(entry) => {
+                    if entry.is_link && depth < max_depth {
+                        if let Some(ref target) = entry.link_target {
+                            current_word = target.clone();
+                            depth += 1;
+                            continue;
+                        }
+                    }
+                    return Ok(Some(entry));
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// 查询 GPT4 词典
+    pub fn lookup_gpt4(&self, word: &str) -> SqliteResult<Option<String>> {
+        let lock = self.conn.lock().unwrap();
+        let conn = match lock.as_ref() {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+
+        let mut stmt = conn.prepare(
+            "SELECT content FROM gpt4_words WHERE LOWER(word) = LOWER(?1)"
+        )?;
+
+        match stmt.query_row([word], |row| row.get(0)) {
+            Ok(content) => Ok(Some(content)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -251,6 +406,30 @@ pub fn search_words(query: String, state: tauri::State<DictionaryState>) -> Resu
         .map_err(|e| format!("Search failed: {}", e))
 }
 
+/// Tauri command: 查询柯林斯词典
+#[tauri::command]
+pub fn lookup_collins(word: String, state: tauri::State<DictionaryState>) -> Result<Option<MdxEntry>, String> {
+    state
+        .lookup_collins(&word)
+        .map_err(|e| format!("Collins lookup failed: {}", e))
+}
+
+/// Tauri command: 查询词根词缀词典
+#[tauri::command]
+pub fn lookup_etyma(word: String, state: tauri::State<DictionaryState>) -> Result<Option<MdxEntry>, String> {
+    state
+        .lookup_etyma(&word)
+        .map_err(|e| format!("Etyma lookup failed: {}", e))
+}
+
+/// Tauri command: 查询 GPT4 词典
+#[tauri::command]
+pub fn lookup_gpt4(word: String, state: tauri::State<DictionaryState>) -> Result<Option<String>, String> {
+    state
+        .lookup_gpt4(&word)
+        .map_err(|e| format!("GPT4 lookup failed: {}", e))
+}
+
 /// 从 content JSON 中提取简短释义
 fn extract_brief(content: &str) -> String {
     // 尝试解析 JSON 并提取第一个翻译
@@ -276,6 +455,46 @@ fn extract_brief(content: &str) -> String {
             }
             if !parts.is_empty() {
                 return parts.join("; ");
+            }
+        }
+    }
+    String::new()
+}
+
+/// 从柯林斯词典 JSON 中提取简短释义
+fn extract_collins_brief(content: &str) -> String {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(content) {
+        if let Some(definitions) = json.get("definitions").and_then(|d| d.as_array()) {
+            let mut parts: Vec<String> = vec![];
+            for def in definitions.iter().take(2) {
+                let pos = def.get("pos").and_then(|p| p.as_str()).unwrap_or("");
+                let cn = def.get("cn").and_then(|c| c.as_str()).unwrap_or("");
+                if !cn.is_empty() {
+                    if !pos.is_empty() {
+                        parts.push(format!("{} {}", pos, cn));
+                    } else {
+                        parts.push(cn.to_string());
+                    }
+                }
+            }
+            if !parts.is_empty() {
+                return parts.join("; ");
+            }
+        }
+    }
+    String::new()
+}
+
+/// 从词根词缀词典 JSON 中提取简短释义
+fn extract_etyma_brief(content: &str) -> String {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(content) {
+        let pos = json.get("pos").and_then(|p| p.as_str()).unwrap_or("");
+        let meaning = json.get("meaning").and_then(|m| m.as_str()).unwrap_or("");
+        if !meaning.is_empty() {
+            if !pos.is_empty() {
+                return format!("{} {}", pos, meaning);
+            } else {
+                return meaning.to_string();
             }
         }
     }
