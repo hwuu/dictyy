@@ -6,6 +6,8 @@ mod dictionary;
 mod llm;
 mod shortcuts;
 mod tray;
+#[cfg(windows)]
+mod screen_capture;
 
 /// 写调试日志到用户目录
 pub fn debug_log(msg: &str) {
@@ -18,6 +20,12 @@ pub fn debug_log(msg: &str) {
             let _ = writeln!(file, "[{}] {}", timestamp, msg);
         }
     }
+}
+
+/// Tauri command: 写调试日志
+#[tauri::command]
+fn debug_log_cmd(msg: String) {
+    debug_log(&msg);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -39,14 +47,20 @@ pub fn run() {
         .manage(dictionary::DictionaryState::new())
         .manage(llm::LlmState::new())
         .invoke_handler(tauri::generate_handler![
+            debug_log_cmd,
             shortcuts::setup_shortcuts,
             dictionary::lookup_word,
             dictionary::search_words,
             dictionary::lookup_collins,
             dictionary::lookup_etyma,
             dictionary::lookup_gpt4,
+            dictionary::lookup_abstract,
             llm::llm_query,
-            llm::get_llm_config
+            llm::get_llm_config,
+            #[cfg(windows)]
+            screen_capture::set_screen_capture_enabled,
+            #[cfg(windows)]
+            screen_capture::get_screen_capture_enabled
         ])
         .setup(|app| {
             debug_log("Setup starting...");
@@ -82,6 +96,17 @@ pub fn run() {
                 debug_log(&format!("ERROR: Failed to initialize shortcuts: {}", e));
             } else {
                 debug_log("Shortcuts initialized successfully");
+            }
+
+            // Initialize screen capture (Windows only)
+            #[cfg(windows)]
+            {
+                debug_log("Initializing screen capture...");
+                if let Err(e) = screen_capture::init_screen_capture(handle) {
+                    debug_log(&format!("ERROR: Failed to initialize screen capture: {}", e));
+                } else {
+                    debug_log("Screen capture initialized successfully");
+                }
             }
 
             debug_log("Setup completed");

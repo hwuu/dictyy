@@ -39,6 +39,7 @@ function App() {
   const [isLlmLoading, setIsLlmLoading] = useState(false);
   const [appVersion, setAppVersion] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const doSearchRef = useRef<(word: string) => void>(() => {});
 
   // 各数据源结果
   const [mainResult, setMainResult] = useState<ParsedWordContent | null>(null);
@@ -61,6 +62,25 @@ function App() {
     const unlisten = listen("new-query", () => {
       inputRef.current?.focus();
       inputRef.current?.select();
+    });
+
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  // Listen for show-word-detail event from bubble window
+  useEffect(() => {
+    const unlisten = listen<{ word: string }>("show-word-detail", async (event) => {
+      const wordToSearch = event.payload.word;
+      // 显示主窗口
+      const window = getCurrentWindow();
+      await window.show();
+      await window.setFocus();
+      // 设置输入框并查询（先设置 searchedWord 防止触发搜索建议）
+      setSearchedWord(wordToSearch);
+      setWord(wordToSearch);
+      doSearchRef.current(wordToSearch);
     });
 
     return () => {
@@ -232,6 +252,9 @@ function App() {
       setIsLlmLoading(false);
     }
   }
+
+  // 保持 doSearchRef 指向最新的 doSearch
+  doSearchRef.current = doSearch;
 
   function clearResults() {
     setMainResult(null);

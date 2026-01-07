@@ -57,6 +57,16 @@ export interface EtymaContent {
   related: { word: string; brief: string }[];
 }
 
+/** 单词摘要（气泡用） */
+export interface WordAbstract {
+  word: string;
+  phonetic: string;
+  main_def: string;
+  collins_def: string;
+  etyma_def: string;
+  gpt4_def: string;
+}
+
 /** 解析后的单词内容 */
 export interface ParsedWordContent {
   word: string;
@@ -122,6 +132,11 @@ export async function lookupEtyma(word: string): Promise<MdxEntry | null> {
 /** 查询 GPT4 词典 */
 export async function lookupGpt4(word: string): Promise<string | null> {
   return invoke<string | null>("lookup_gpt4", { word });
+}
+
+/** 查询单词摘要（从内存） */
+export async function lookupAbstract(word: string): Promise<WordAbstract | null> {
+  return invoke<WordAbstract | null>("lookup_abstract", { word });
 }
 
 /** 解析柯林斯词典内容 */

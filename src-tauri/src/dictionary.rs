@@ -2,6 +2,7 @@
 
 use rusqlite::{Connection, Result as SqliteResult};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use strsim::levenshtein;
@@ -34,24 +35,126 @@ pub struct MdxEntry {
     pub link_target: Option<String>,
 }
 
+/// 单词摘要（用于气泡快速显示）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WordAbstract {
+    pub word: String,
+    pub phonetic: String,
+    pub main_def: String,
+    pub collins_def: String,
+    pub etyma_def: String,
+    pub gpt4_def: String,
+}
+
 /// 词典状态管理
 pub struct DictionaryState {
     conn: Mutex<Option<Connection>>,
+    /// 单词摘要缓存（key 为小写单词）
+    abstracts: Mutex<HashMap<String, WordAbstract>>,
 }
 
 impl DictionaryState {
     pub fn new() -> Self {
         Self {
             conn: Mutex::new(None),
+            abstracts: Mutex::new(HashMap::new()),
         }
     }
 
     /// 初始化数据库连接
     pub fn init(&self, db_path: PathBuf) -> SqliteResult<()> {
-        let conn = Connection::open(db_path)?;
+        let conn = Connection::open(&db_path)?;
+
+        // 加载 word_abstracts 到内存
+        self.load_abstracts(&conn)?;
+
         let mut lock = self.conn.lock().unwrap();
         *lock = Some(conn);
         Ok(())
+    }
+
+    /// 加载单词摘要到内存
+    fn load_abstracts(&self, conn: &Connection) -> SqliteResult<()> {
+        let mut stmt = conn.prepare(
+            "SELECT word, phonetic, main_def, collins_def, etyma_def, gpt4_def FROM word_abstracts"
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(WordAbstract {
+                word: row.get(0)?,
+                phonetic: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                main_def: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                collins_def: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                etyma_def: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                gpt4_def: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+            })
+        })?;
+
+        let mut abstracts = self.abstracts.lock().unwrap();
+        let mut count = 0;
+        for row in rows {
+            if let Ok(abstract_entry) = row {
+                let key = abstract_entry.word.to_lowercase();
+                abstracts.insert(key, abstract_entry);
+                count += 1;
+            }
+        }
+
+        crate::debug_log(&format!("[Dictionary] Loaded {} abstracts into memory", count));
+        Ok(())
+    }
+
+    /// 查询单词摘要（从内存，支持词形还原和数据库回退）
+    pub fn lookup_abstract(&self, word: &str) -> Option<WordAbstract> {
+        let word_lower = word.to_lowercase();
+
+        // 1. 从内存精确匹配
+        {
+            let abstracts = self.abstracts.lock().unwrap();
+            if let Some(entry) = abstracts.get(&word_lower) {
+                return Some(entry.clone());
+            }
+
+            // 2. 尝试词形还原
+            let stems = get_word_stems(&word_lower);
+            for stem in &stems {
+                if let Some(entry) = abstracts.get(stem) {
+                    let mut result = entry.clone();
+                    result.word = word.to_string();
+                    return Some(result);
+                }
+            }
+        }
+
+        // 3. 回退到数据库查询（与主界面一致）
+        // 先查主词典
+        if let Ok(Some(entry)) = self.lookup(word) {
+            return Some(WordAbstract {
+                word: entry.word,
+                phonetic: entry.phonetic_us.or(entry.phonetic_uk).unwrap_or_default(),
+                main_def: extract_brief(&entry.content),
+                collins_def: String::new(),
+                etyma_def: String::new(),
+                gpt4_def: entry.gpt4_content.unwrap_or_default(),
+            });
+        }
+
+        // 再查柯林斯
+        if let Ok(Some(entry)) = self.lookup_collins(word) {
+            if !entry.is_link {
+                let (phonetic, collins_def) = extract_collins_abstract(&entry.content);
+                return Some(WordAbstract {
+                    word: word.to_string(),
+                    phonetic,
+                    main_def: String::new(),
+                    collins_def,
+                    etyma_def: String::new(),
+                    gpt4_def: String::new(),
+                });
+            }
+        }
+
+        None
     }
 
     /// 查询单词
@@ -430,6 +533,12 @@ pub fn lookup_gpt4(word: String, state: tauri::State<DictionaryState>) -> Result
         .map_err(|e| format!("GPT4 lookup failed: {}", e))
 }
 
+/// Tauri command: 查询单词摘要（从内存）
+#[tauri::command]
+pub fn lookup_abstract(word: String, state: tauri::State<DictionaryState>) -> Option<WordAbstract> {
+    state.lookup_abstract(&word)
+}
+
 /// 从 content JSON 中提取简短释义
 fn extract_brief(content: &str) -> String {
     // 尝试解析 JSON 并提取第一个翻译
@@ -485,6 +594,21 @@ fn extract_collins_brief(content: &str) -> String {
     String::new()
 }
 
+/// 从柯林斯词典 JSON 中提取音标和释义（用于 abstract 回退）
+fn extract_collins_abstract(content: &str) -> (String, String) {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(content) {
+        let phonetic = json
+            .get("phonetic_uk")
+            .or_else(|| json.get("phonetic_us"))
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .to_string();
+        let def = extract_collins_brief(content);
+        return (phonetic, def);
+    }
+    (String::new(), String::new())
+}
+
 /// 从词根词缀词典 JSON 中提取简短释义
 fn extract_etyma_brief(content: &str) -> String {
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(content) {
@@ -499,4 +623,57 @@ fn extract_etyma_brief(content: &str) -> String {
         }
     }
     String::new()
+}
+
+/// 简单词形还原：返回可能的词干形式
+fn get_word_stems(word: &str) -> Vec<String> {
+    let mut stems = Vec::new();
+
+    // 复数 -> 单数
+    if word.ends_with("ies") && word.len() > 3 {
+        // studies -> study
+        stems.push(format!("{}y", &word[..word.len() - 3]));
+    }
+    if word.ends_with("es") && word.len() > 2 {
+        // watches -> watch, boxes -> box
+        stems.push(word[..word.len() - 2].to_string());
+        // resources -> resource
+        stems.push(word[..word.len() - 1].to_string());
+    }
+    if word.ends_with('s') && word.len() > 1 {
+        // cats -> cat
+        stems.push(word[..word.len() - 1].to_string());
+    }
+
+    // 过去式/过去分词 -> 原形
+    if word.ends_with("ied") && word.len() > 3 {
+        // studied -> study
+        stems.push(format!("{}y", &word[..word.len() - 3]));
+    }
+    if word.ends_with("ed") && word.len() > 2 {
+        // walked -> walk
+        stems.push(word[..word.len() - 2].to_string());
+        // loved -> love
+        stems.push(word[..word.len() - 1].to_string());
+    }
+
+    // 进行时 -> 原形
+    if word.ends_with("ing") && word.len() > 3 {
+        // walking -> walk
+        stems.push(word[..word.len() - 3].to_string());
+        // loving -> love
+        stems.push(format!("{}e", &word[..word.len() - 3]));
+    }
+
+    // 比较级/最高级 -> 原形
+    if word.ends_with("er") && word.len() > 2 {
+        stems.push(word[..word.len() - 2].to_string());
+        stems.push(word[..word.len() - 1].to_string());
+    }
+    if word.ends_with("est") && word.len() > 3 {
+        stems.push(word[..word.len() - 3].to_string());
+        stems.push(word[..word.len() - 2].to_string());
+    }
+
+    stems
 }
