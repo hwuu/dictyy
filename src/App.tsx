@@ -71,19 +71,28 @@ function App() {
 
   // Listen for show-word-detail event from bubble window
   useEffect(() => {
+    console.log("[App] Setting up show-word-detail listener");
     const unlisten = listen<{ word: string }>("show-word-detail", async (event) => {
+      console.log("[App] Received show-word-detail event:", event.payload);
       const wordToSearch = event.payload.word;
       // 显示主窗口
       const window = getCurrentWindow();
       await window.show();
       await window.setFocus();
+      console.log("[App] Window shown and focused");
       // 设置输入框并查询（先设置 searchedWord 防止触发搜索建议）
       setSearchedWord(wordToSearch);
       setWord(wordToSearch);
-      doSearchRef.current(wordToSearch);
+      if (doSearchRef.current) {
+        console.log("[App] Calling doSearch with:", wordToSearch);
+        doSearchRef.current(wordToSearch);
+      } else {
+        console.error("[App] doSearchRef.current is undefined!");
+      }
     });
 
     return () => {
+      console.log("[App] Cleaning up show-word-detail listener");
       unlisten.then((fn) => fn());
     };
   }, []);

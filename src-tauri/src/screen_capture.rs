@@ -1,25 +1,33 @@
 //! 屏幕取词模块
 //!
 //! 使用 UI Automation API 轮询获取选中文本。
+//! 当 UIA 不支持时，回退到 Ctrl+C 方案。
 //! 当选中文本稳定 500ms 后显示气泡，文本变化或清空时关闭气泡。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager, WebviewWindowBuilder, WebviewUrl};
+use tauri::{AppHandle, Manager, WebviewWindowBuilder, WebviewUrl};
 use windows::core::Interface;
-use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::Ole::{
     SafeArrayAccessData, SafeArrayGetLBound, SafeArrayGetUBound, SafeArrayUnaccessData,
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationTextPattern, UIA_TextPatternId,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_C, VK_CONTROL,
+};
+use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+use windows::Win32::Foundation::POINT;
 
 use crate::debug_log;
 
 /// 选中文本的位置信息
+#[allow(dead_code)]
+#[derive(Clone)]
 struct TextBounds {
     left: i32,
     top: i32,
@@ -88,10 +96,59 @@ fn start_polling() -> Result<(), String> {
         .map_err(|e| format!("Failed to create IUIAutomation: {:?}", e))?
     };
 
-    // 上次检测到的文本和时间
-    let mut last_text: Option<String> = None;
+    // 上次检测到的文本、位置和时间
+    let mut last_text: Option<(String, Option<TextBounds>)> = None;
     let mut last_text_time: Option<Instant> = None;
     let mut bubble_shown_for: Option<String> = None;
+    // DEBUG: 上次焦点信息，用于减少重复日志
+    let mut last_focus_info: Option<(String, i32)> = None;
+    // Ctrl+C 回退相关
+    let mut last_clipboard_fallback: Option<Instant> = None;
+    let mut cached_clipboard_text: Option<(String, Option<TextBounds>)> = None;
+
+    // 应该触发 Ctrl+C 回退的控件类型
+    // Document=50030, Edit=50004, Text=50020, Pane=50033, Window=50032, Group=50026
+    let should_fallback_to_clipboard = |control_type: i32| -> bool {
+        matches!(control_type, 50030 | 50004 | 50020 | 50033 | 50032 | 50026)
+    };
+
+    // 检查是否应该跳过 Ctrl+C（Terminal 类应用、桌面、任务栏等系统组件）
+    let should_skip_clipboard_fallback = |window_name: &str, class_name: &str| -> bool {
+        let name_lower = window_name.to_lowercase();
+        let class_lower = class_name.to_lowercase();
+
+        // Terminal 类应用（Ctrl+C 会中断程序）
+        if name_lower.contains("terminal") ||
+           name_lower.contains("powershell") ||
+           name_lower.contains("cmd.exe") ||
+           name_lower.contains("command prompt") ||
+           name_lower.contains("console") ||
+           name_lower.contains("warp") ||
+           name_lower.contains("alacritty") ||
+           name_lower.contains("iterm") ||
+           class_lower.contains("terminal") ||
+           class_lower.contains("console") ||
+           class_lower.contains("mintty") ||  // Git Bash
+           class_lower.contains("foregroundstaging") {  // Windows Terminal
+            return true;
+        }
+
+        // Windows Terminal 的输入框组件
+        if class_lower.contains("windows.ui.input.inputsite") {
+            return true;
+        }
+
+        // 桌面和任务栏等系统组件
+        if class_lower.starts_with("#32769") ||  // Desktop
+           name_lower.contains("桌面") ||
+           name_lower.contains("desktop") ||
+           name_lower.contains("taskbar") ||
+           name_lower.contains("任务栏") {
+            return true;
+        }
+
+        false
+    };
 
     loop {
         thread::sleep(Duration::from_millis(200)); // 200ms 轮询间隔
@@ -100,11 +157,62 @@ fn start_polling() -> Result<(), String> {
             continue;
         }
 
-        // 获取当前选中文本
-        let current = get_selected_text_with_automation(&automation);
+        // 获取当前选中文本（优先 UIA，失败则回退到 Ctrl+C）
+        let (current, focus_changed): (Option<(String, Option<TextBounds>)>, bool) = match get_selected_text_with_automation(&automation, &mut last_focus_info) {
+            Ok(result) => {
+                // UIA 成功，清除 Ctrl+C 缓存
+                cached_clipboard_text = None;
+                (result.text, result.focus_changed)
+            }
+            Err(uia_error) => {
+                // UIA 失败，检查控件类型是否应该回退到 Ctrl+C
+                // 同时排除 Terminal 类应用、桌面等系统组件（Ctrl+C 会中断程序或无意义）
+                let should_skip = should_skip_clipboard_fallback(&uia_error.window_name, &uia_error.class_name);
+                if should_skip && uia_error.focus_changed {
+                    debug_log(&format!("[Clipboard] Skipping Ctrl+C for: class='{}', name='{}'",
+                        uia_error.class_name, uia_error.window_name));
+                }
+
+                if !should_fallback_to_clipboard(uia_error.control_type) || should_skip {
+                    // 不应该回退（控件类型不对，或是 Terminal/桌面等系统组件）
+                    cached_clipboard_text = None;
+                    (None, uia_error.focus_changed)
+                } else {
+                    // 应该回退，检查冷却时间
+                    let can_fallback = last_clipboard_fallback
+                        .map(|t| t.elapsed() >= Duration::from_secs(1))
+                        .unwrap_or(true);
+
+                    if can_fallback {
+                        if uia_error.focus_changed {
+                            debug_log(&format!("[Clipboard] Triggering Ctrl+C for: class='{}', name='{}'",
+                                uia_error.class_name, uia_error.window_name));
+                        }
+                        last_clipboard_fallback = Some(Instant::now());
+                        let result = get_selected_text_with_clipboard();
+                        // 缓存结果
+                        cached_clipboard_text = result.clone();
+                        (result, uia_error.focus_changed)
+                    } else {
+                        // 冷却中，返回缓存的结果（保持状态）
+                        (cached_clipboard_text.clone(), false)
+                    }
+                }
+            }
+        };
+
+        // 焦点变化时，关闭气泡并重置状态
+        if focus_changed {
+            if bubble_shown_for.is_some() {
+                close_bubble();
+                bubble_shown_for = None;
+            }
+            last_text = None;
+            last_text_time = None;
+        }
 
         match current {
-            Ok(Some((text, bounds))) => {
+            Some((text, bounds)) => {
                 let text = text.trim().to_string();
 
                 if !is_valid_word(&text) {
@@ -122,30 +230,42 @@ fn start_polling() -> Result<(), String> {
                 }
 
                 // 检查文本是否变化
-                let text_changed = last_text.as_ref() != Some(&text);
+                let text_changed = last_text.as_ref().map(|(t, _)| t) != Some(&text);
 
                 if text_changed {
-                    // 文本变化，重置计时
-                    last_text = Some(text.clone());
-                    last_text_time = Some(Instant::now());
+                    // 文本变化
+                    if focus_changed {
+                        // 焦点刚变化，只记录文本但不开始计时（忽略窗口切换时已选中的文本）
+                        debug_log(&format!("[Bubble] Text detected after focus change (ignored): '{}'", text));
+                        last_text = Some((text.clone(), bounds));
+                        last_text_time = None;
+                    } else {
+                        // 焦点稳定，正常的文本变化，开始计时
+                        debug_log(&format!("[Bubble] Text changed to: '{}'", text));
+                        last_text = Some((text.clone(), bounds));
+                        last_text_time = Some(Instant::now());
 
-                    // 如果气泡显示的是不同的词，关闭它
-                    if bubble_shown_for.as_ref() != Some(&text) && bubble_shown_for.is_some() {
-                        close_bubble();
-                        bubble_shown_for = None;
+                        // 如果气泡显示的是不同的词，关闭它
+                        if bubble_shown_for.as_ref() != Some(&text) && bubble_shown_for.is_some() {
+                            close_bubble();
+                            bubble_shown_for = None;
+                        }
                     }
                 } else if let Some(start_time) = last_text_time {
-                    // 文本没变，检查是否稳定了 500ms
-                    if start_time.elapsed() >= Duration::from_millis(500) {
+                    // 文本没变，检查是否稳定了 200ms
+                    if start_time.elapsed() >= Duration::from_millis(200) {
                         // 稳定了，显示气泡（如果还没显示）
                         if bubble_shown_for.as_ref() != Some(&text) {
-                            show_bubble(&text, bounds);
+                            // 使用首次检测时保存的 bounds，而不是当前的 bounds
+                            let saved_bounds = last_text.as_ref().and_then(|(_, b)| b.clone());
+                            debug_log(&format!("[Bubble] Showing bubble for: '{}', bounds: {:?}", text, saved_bounds.as_ref().map(|b| (b.left, b.top, b.right, b.bottom))));
+                            show_bubble(&text, saved_bounds);
                             bubble_shown_for = Some(text.clone());
                         }
                     }
                 }
             }
-            Ok(None) | Err(_) => {
+            None => {
                 // 没有选中文本或获取失败
                 if last_text.is_some() {
                     last_text = None;
@@ -172,7 +292,7 @@ fn close_bubble() {
         let app_clone = app.clone();
         let _ = app.run_on_main_thread(move || {
             if let Some(bubble) = app_clone.get_webview_window("bubble") {
-                let _ = bubble.hide();
+                let _ = bubble.close();
             }
         });
     }
@@ -182,58 +302,121 @@ fn close_bubble() {
     *current = None;
 }
 
+/// UIA 失败时的错误信息，包含控件类型用于判断是否回退
+struct UiaError {
+    control_type: i32,
+    focus_changed: bool,
+    window_name: String,
+    class_name: String,
+    #[allow(dead_code)]
+    message: String,
+}
+
+/// UIA 成功时的结果
+struct UiaSuccess {
+    text: Option<(String, Option<TextBounds>)>,
+    focus_changed: bool,
+}
+
 /// 使用 UI Automation 获取选中文本及其位置（复用 automation 实例）
 fn get_selected_text_with_automation(
     automation: &IUIAutomation,
-) -> Result<Option<(String, Option<TextBounds>)>, String> {
+    last_focus_info: &mut Option<(String, i32)>,
+) -> Result<UiaSuccess, UiaError> {
     unsafe {
         // 获取焦点元素
         let focused = automation
             .GetFocusedElement()
-            .map_err(|e| format!("GetFocusedElement failed: {:?}", e))?;
+            .map_err(|e| UiaError { control_type: 0, focus_changed: false, window_name: String::new(), class_name: String::new(), message: format!("GetFocusedElement failed: {:?}", e) })?;
+
+        // 获取焦点元素的信息
+        let class_name = focused.CurrentClassName().unwrap_or_default().to_string();
+        let control_type = focused.CurrentControlType().unwrap_or_default().0 as i32;
+        let name = focused.CurrentName().unwrap_or_default().to_string();
+        let pid = focused.CurrentProcessId().unwrap_or_default();
+
+        // 只在焦点变化时打印日志
+        let current_focus = (name.clone(), pid);
+        let focus_changed = last_focus_info.as_ref() != Some(&current_focus);
+
+        if focus_changed {
+            // 安全截断字符串（按字符数而非字节数）
+            let truncated_name = if name.chars().count() > 30 {
+                format!("{}...", name.chars().take(30).collect::<String>())
+            } else {
+                name.clone()
+            };
+            debug_log(&format!(
+                "[UIA] Focus changed: class='{}', type={}, name='{}', pid={}",
+                class_name, control_type, truncated_name, pid
+            ));
+        }
 
         // 尝试获取 TextPattern
-        let pattern_obj = focused
-            .GetCurrentPattern(UIA_TextPatternId)
-            .map_err(|e| format!("GetCurrentPattern failed: {:?}", e))?;
+        let pattern_obj = match focused.GetCurrentPattern(UIA_TextPatternId) {
+            Ok(p) => p,
+            Err(e) => {
+                if focus_changed {
+                    debug_log(&format!("[UIA] TextPattern NOT supported: {:?}", e));
+                    *last_focus_info = Some(current_focus);
+                }
+                return Err(UiaError { control_type, focus_changed, window_name: name, class_name, message: format!("GetCurrentPattern failed: {:?}", e) });
+            }
+        };
 
-        let text_pattern: IUIAutomationTextPattern = pattern_obj
-            .cast()
-            .map_err(|e| format!("Cast to TextPattern failed: {:?}", e))?;
+        let text_pattern: IUIAutomationTextPattern = match pattern_obj.cast() {
+            Ok(p) => p,
+            Err(e) => {
+                if focus_changed {
+                    debug_log(&format!("[UIA] Cast to TextPattern failed: {:?}", e));
+                    *last_focus_info = Some(current_focus);
+                }
+                return Err(UiaError { control_type, focus_changed, window_name: name, class_name, message: format!("Cast to TextPattern failed: {:?}", e) });
+            }
+        };
+
+        if focus_changed {
+            debug_log("[UIA] TextPattern supported");
+            *last_focus_info = Some(current_focus);
+        }
 
         // 获取选中的文本范围
-        let selection = text_pattern
-            .GetSelection()
-            .map_err(|e| format!("GetSelection failed: {:?}", e))?;
+        let selection = match text_pattern.GetSelection() {
+            Ok(s) => s,
+            Err(_) => return Ok(UiaSuccess { text: None, focus_changed }), // 获取失败，返回无选中
+        };
 
-        let count = selection
-            .Length()
-            .map_err(|e| format!("Get selection length failed: {:?}", e))?;
+        let count = match selection.Length() {
+            Ok(c) => c,
+            Err(_) => return Ok(UiaSuccess { text: None, focus_changed }),
+        };
 
         if count == 0 {
-            return Ok(None);
+            return Ok(UiaSuccess { text: None, focus_changed });
         }
 
         // 获取第一个选中范围
-        let range = selection
-            .GetElement(0)
-            .map_err(|e| format!("GetElement failed: {:?}", e))?;
+        let range = match selection.GetElement(0) {
+            Ok(r) => r,
+            Err(_) => return Ok(UiaSuccess { text: None, focus_changed }),
+        };
 
         // 获取文本
-        let text_bstr = range
-            .GetText(-1)
-            .map_err(|e| format!("GetText failed: {:?}", e))?;
+        let text_bstr = match range.GetText(-1) {
+            Ok(t) => t,
+            Err(_) => return Ok(UiaSuccess { text: None, focus_changed }),
+        };
 
         let text = text_bstr.to_string();
 
         if text.is_empty() {
-            return Ok(None);
+            return Ok(UiaSuccess { text: None, focus_changed });
         }
 
         // 获取边界矩形
         let bounds = get_text_bounds(&range);
 
-        Ok(Some((text, bounds)))
+        Ok(UiaSuccess { text: Some((text, bounds)), focus_changed })
     }
 }
 
@@ -314,14 +497,6 @@ fn show_bubble(word: &str, bounds: Option<TextBounds>) {
         return;
     };
 
-    // 检查是否已经显示了相同的单词
-    {
-        let current = CURRENT_BUBBLE_WORD.lock().unwrap();
-        if current.as_ref() == Some(&word.to_string()) {
-            return;
-        }
-    }
-
     // 更新当前气泡单词
     {
         let mut current = CURRENT_BUBBLE_WORD.lock().unwrap();
@@ -390,16 +565,11 @@ fn show_bubble(word: &str, bounds: Option<TextBounds>) {
 
         let url = format!("/bubble?word={}", urlencoding::encode(&word));
 
-        // 尝试复用已有的气泡窗口
+        // 如果气泡窗口已存在，先关闭并等待
         if let Some(bubble) = app_clone.get_webview_window("bubble") {
-            // 更新位置
-            let _ = bubble.set_position(tauri::Position::Logical(tauri::LogicalPosition {
-                x: bubble_x as f64,
-                y: bubble_y as f64,
-            }));
-            // 发送事件更新单词
-            let _ = bubble.emit("update-word", &word);
-            return;
+            let _ = bubble.close();
+            // 短暂延迟确保窗口完全关闭
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
         // 创建新的气泡窗口
@@ -427,4 +597,132 @@ pub fn set_screen_capture_enabled(enabled: bool) {
 #[tauri::command]
 pub fn get_screen_capture_enabled() -> bool {
     is_enabled()
+}
+
+/// 使用 Ctrl+C 方案获取选中文本（UIA 失败时的回退方案）
+fn get_selected_text_with_clipboard() -> Option<(String, Option<TextBounds>)> {
+    use clipboard_win::{formats, get_clipboard, set_clipboard};
+
+    // 1. 保存当前剪贴板内容
+    let saved_clipboard: Option<String> = get_clipboard(formats::Unicode).ok();
+
+    // 2. 清空剪贴板（用于检测是否有新内容）
+    let _ = set_clipboard(formats::Unicode, "");
+
+    // 3. 模拟 Ctrl+C
+    unsafe {
+        let inputs = [
+            // Ctrl down
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VK_CONTROL,
+                        wScan: 0,
+                        dwFlags: KEYBD_EVENT_FLAGS(0),
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+            // C down
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VK_C,
+                        wScan: 0,
+                        dwFlags: KEYBD_EVENT_FLAGS(0),
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+            // C up
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VK_C,
+                        wScan: 0,
+                        dwFlags: KEYEVENTF_KEYUP,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+            // Ctrl up
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VK_CONTROL,
+                        wScan: 0,
+                        dwFlags: KEYEVENTF_KEYUP,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+        ];
+
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+
+    // 4. 等待复制完成
+    thread::sleep(Duration::from_millis(100));
+
+    // 5. 读取剪贴板
+    let new_text: Option<String> = get_clipboard(formats::Unicode).ok();
+
+    // 6. 恢复剪贴板
+    if let Some(saved) = saved_clipboard {
+        let _ = set_clipboard(formats::Unicode, &saved);
+    }
+
+    // 7. 获取鼠标位置作为气泡显示位置（因为 Ctrl+C 回退无法获取精确文本边界）
+    let bounds = get_mouse_position();
+
+    // 检查是否获取到新文本
+    if let Some(text) = new_text {
+        let text = text.trim().to_string();
+        if !text.is_empty() {
+            return Some((text, bounds));
+        }
+    }
+
+    None
+}
+
+/// 获取焦点元素的边界矩形
+#[allow(dead_code)]
+fn get_focused_element_bounds(automation: &IUIAutomation) -> Option<TextBounds> {
+    unsafe {
+        let focused = automation.GetFocusedElement().ok()?;
+        let rect = focused.CurrentBoundingRectangle().ok()?;
+        Some(TextBounds {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        })
+    }
+}
+
+/// 获取鼠标位置（用于 Ctrl+C 回退方案）
+fn get_mouse_position() -> Option<TextBounds> {
+    unsafe {
+        let mut point = POINT::default();
+        if GetCursorPos(&mut point).is_ok() {
+            // 返回以鼠标位置为中心的小矩形，气泡会显示在其下方
+            Some(TextBounds {
+                left: point.x,
+                top: point.y,
+                right: point.x,
+                bottom: point.y,
+            })
+        } else {
+            None
+        }
+    }
 }

@@ -10,6 +10,17 @@ export function Bubble() {
   const isFirstLoad = useRef(true);
 
   useEffect(() => {
+    console.log("[Bubble] Component mounted");
+
+    // F12 打开开发者工具（调试用）
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "F12") {
+        console.log("[Bubble] F12 pressed");
+        getCurrentWindow().emit("toggle-devtools");
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+
     // 查询单词的函数
     async function lookup(word: string) {
       // 如果是相同的单词，不重新查询
@@ -80,11 +91,21 @@ export function Bubble() {
 
   // 点击详细按钮
   async function handleDetailClick() {
+    console.log("[Bubble] handleDetailClick called, data:", data);
     if (data) {
-      // 发送事件给主窗口
-      await emitTo("main", "show-word-detail", { word: data.word });
-      // 关闭气泡
-      getCurrentWindow().close();
+      console.log("[Bubble] Sending show-word-detail event for:", data.word);
+      try {
+        // 发送事件给主窗口
+        await emitTo("main", "show-word-detail", { word: data.word });
+        console.log("[Bubble] Event sent successfully");
+        // 关闭气泡
+        await getCurrentWindow().close();
+        console.log("[Bubble] Bubble closed");
+      } catch (error) {
+        console.error("[Bubble] Error:", error);
+      }
+    } else {
+      console.error("[Bubble] No data available");
     }
   }
 
