@@ -1,5 +1,6 @@
 //! 词典模块 - 提供离线词典查询功能
 
+use log::{debug, error, info};
 use rusqlite::{Connection, Result as SqliteResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -100,7 +101,7 @@ impl DictionaryState {
             }
         }
 
-        crate::debug_log(&format!("[Dictionary] Loaded {} abstracts into memory", count));
+        info!("Loaded {} word abstracts into memory", count);
         Ok(())
     }
 
@@ -447,7 +448,7 @@ fn get_db_path(app: &AppHandle) -> Option<PathBuf> {
         ];
 
         for path in &candidates {
-            crate::debug_log(&format!("[Dictionary] Checking path: {:?}, exists: {}", path, path.exists()));
+            debug!("Checking dictionary path: {:?}, exists: {}", path, path.exists());
             if path.exists() {
                 return Some(path.clone());
             }
@@ -462,7 +463,7 @@ fn get_db_path(app: &AppHandle) -> Option<PathBuf> {
 
     for path_opt in &dev_candidates {
         if let Some(path) = path_opt {
-            crate::debug_log(&format!("[Dictionary] Checking dev path: {:?}, exists: {}", path, path.exists()));
+            debug!("Checking dev dictionary path: {:?}, exists: {}", path, path.exists());
             if path.exists() {
                 return Some(path.clone());
             }
@@ -475,18 +476,18 @@ fn get_db_path(app: &AppHandle) -> Option<PathBuf> {
 /// 初始化词典
 pub fn init_dictionary(app: &AppHandle) -> Result<(), String> {
     let db_path = get_db_path(app).ok_or("Dictionary database not found in any expected location")?;
-    crate::debug_log(&format!("[Dictionary] Using db path: {:?}", db_path));
+    info!("Using dictionary database: {:?}", db_path);
 
     let state = app.state::<DictionaryState>();
     state
         .init(db_path.clone())
         .map_err(|e| {
             let err = format!("Failed to open dictionary: {}", e);
-            crate::debug_log(&format!("[Dictionary] {}", err));
+            error!("{}", err);
             err
         })?;
 
-    crate::debug_log("[Dictionary] Successfully initialized");
+    info!("Dictionary initialized successfully");
     Ok(())
 }
 

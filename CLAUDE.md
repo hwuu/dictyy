@@ -136,8 +136,9 @@ result = subprocess.run(
 - `src-tauri/config.yaml` (优先使用，如存在)
 
 **日志文件路径**：
-- Windows: `%LOCALAPPDATA%\Dictyy\logs\` (即 `C:\Users\<用户名>\AppData\Local\Dictyy\logs\`)
+- Windows: `%LOCALAPPDATA%\com.hwuu.dictyy\logs\Dictyy.log` (即 `C:\Users\<用户名>\AppData\Local\com.hwuu.dictyy\logs\Dictyy.log`)
 - 使用 `tauri-plugin-log` 自动写入
+- 开发模式：DEBUG 级别，生产模式：INFO 级别
 
 **说明**：首次启动时会自动创建配置目录和模板文件，用户需要手动编辑 API 配置。
 

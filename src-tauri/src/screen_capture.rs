@@ -23,7 +23,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use windows::Win32::Foundation::POINT;
 
-use crate::debug_log;
+use log::{debug, info, warn};
 
 /// 选中文本的位置信息
 #[allow(dead_code)]
@@ -47,7 +47,7 @@ static CURRENT_BUBBLE_WORD: Mutex<Option<String>> = Mutex::new(None);
 /// 启用/禁用屏幕取词
 pub fn set_enabled(enabled: bool) {
     SCREEN_CAPTURE_ENABLED.store(enabled, Ordering::SeqCst);
-    debug_log(&format!("Screen capture enabled: {}", enabled));
+    info!("Screen capture enabled: {}", enabled);
 }
 
 /// 获取屏幕取词状态
@@ -57,7 +57,7 @@ pub fn is_enabled() -> bool {
 
 /// 初始化屏幕取词
 pub fn init_screen_capture(app: &AppHandle) -> Result<(), String> {
-    debug_log("Initializing screen capture with polling...");
+    info!("Initializing screen capture with polling...");
 
     // 保存 AppHandle
     {
@@ -68,7 +68,7 @@ pub fn init_screen_capture(app: &AppHandle) -> Result<(), String> {
     // 启动轮询线程
     thread::spawn(|| {
         if let Err(e) = start_polling() {
-            debug_log(&format!("Polling thread error: {}", e));
+            warn!("Polling thread error: {}", e);
         }
     });
 
@@ -77,7 +77,7 @@ pub fn init_screen_capture(app: &AppHandle) -> Result<(), String> {
 
 /// 启动轮询
 fn start_polling() -> Result<(), String> {
-    debug_log("Starting selection polling...");
+    info!("Starting text selection polling...");
 
     unsafe {
         // 初始化 COM
@@ -169,8 +169,8 @@ fn start_polling() -> Result<(), String> {
                 // 同时排除 Terminal 类应用、桌面等系统组件（Ctrl+C 会中断程序或无意义）
                 let should_skip = should_skip_clipboard_fallback(&uia_error.window_name, &uia_error.class_name);
                 if should_skip && uia_error.focus_changed {
-                    debug_log(&format!("[Clipboard] Skipping Ctrl+C for: class='{}', name='{}'",
-                        uia_error.class_name, uia_error.window_name));
+                    debug!("Skipping clipboard fallback for: class='{}', name='{}'",
+                        uia_error.class_name, uia_error.window_name);
                 }
 
                 if !should_fallback_to_clipboard(uia_error.control_type) || should_skip {
@@ -185,8 +185,8 @@ fn start_polling() -> Result<(), String> {
 
                     if can_fallback {
                         if uia_error.focus_changed {
-                            debug_log(&format!("[Clipboard] Triggering Ctrl+C for: class='{}', name='{}'",
-                                uia_error.class_name, uia_error.window_name));
+                            warn!("Using clipboard fallback for: class='{}', name='{}'",
+                                uia_error.class_name, uia_error.window_name);
                         }
                         last_clipboard_fallback = Some(Instant::now());
                         let result = get_selected_text_with_clipboard();
@@ -236,12 +236,12 @@ fn start_polling() -> Result<(), String> {
                     // 文本变化
                     if focus_changed {
                         // 焦点刚变化，只记录文本但不开始计时（忽略窗口切换时已选中的文本）
-                        debug_log(&format!("[Bubble] Text detected after focus change (ignored): '{}'", text));
+                        debug!("Text detected after focus change (ignored): '{}'", text);
                         last_text = Some((text.clone(), bounds));
                         last_text_time = None;
                     } else {
                         // 焦点稳定，正常的文本变化，开始计时
-                        debug_log(&format!("[Bubble] Text changed to: '{}'", text));
+                        debug!("Text selection changed to: '{}'", text);
                         last_text = Some((text.clone(), bounds));
                         last_text_time = Some(Instant::now());
 
@@ -258,7 +258,7 @@ fn start_polling() -> Result<(), String> {
                         if bubble_shown_for.as_ref() != Some(&text) {
                             // 使用首次检测时保存的 bounds，而不是当前的 bounds
                             let saved_bounds = last_text.as_ref().and_then(|(_, b)| b.clone());
-                            debug_log(&format!("[Bubble] Showing bubble for: '{}', bounds: {:?}", text, saved_bounds.as_ref().map(|b| (b.left, b.top, b.right, b.bottom))));
+                            debug!("Showing bubble for text: '{}', bounds: {:?}", text, saved_bounds.as_ref().map(|b| (b.left, b.top, b.right, b.bottom)));
                             show_bubble(&text, saved_bounds);
                             bubble_shown_for = Some(text.clone());
                         }
@@ -346,10 +346,10 @@ fn get_selected_text_with_automation(
             } else {
                 name.clone()
             };
-            debug_log(&format!(
-                "[UIA] Focus changed: class='{}', type={}, name='{}', pid={}",
+            debug!(
+                "Focus changed: class='{}', type={}, name='{}', pid={}",
                 class_name, control_type, truncated_name, pid
-            ));
+            );
         }
 
         // 尝试获取 TextPattern
@@ -357,7 +357,7 @@ fn get_selected_text_with_automation(
             Ok(p) => p,
             Err(e) => {
                 if focus_changed {
-                    debug_log(&format!("[UIA] TextPattern NOT supported: {:?}", e));
+                    debug!("TextPattern not supported: {:?}", e);
                     *last_focus_info = Some(current_focus);
                 }
                 return Err(UiaError { control_type, focus_changed, window_name: name, class_name, message: format!("GetCurrentPattern failed: {:?}", e) });
@@ -368,7 +368,7 @@ fn get_selected_text_with_automation(
             Ok(p) => p,
             Err(e) => {
                 if focus_changed {
-                    debug_log(&format!("[UIA] Cast to TextPattern failed: {:?}", e));
+                    debug!("Cast to TextPattern failed: {:?}", e);
                     *last_focus_info = Some(current_focus);
                 }
                 return Err(UiaError { control_type, focus_changed, window_name: name, class_name, message: format!("Cast to TextPattern failed: {:?}", e) });
@@ -376,7 +376,7 @@ fn get_selected_text_with_automation(
         };
 
         if focus_changed {
-            debug_log("[UIA] TextPattern supported");
+            debug!("TextPattern supported for current focus");
             *last_focus_info = Some(current_focus);
         }
 

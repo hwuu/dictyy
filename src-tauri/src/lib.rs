@@ -1,6 +1,5 @@
+use log::{error, info};
 use tauri::{Manager, WindowEvent};
-use std::fs::OpenOptions;
-use std::io::Write;
 
 mod dictionary;
 mod llm;
@@ -8,25 +7,6 @@ mod shortcuts;
 mod tray;
 #[cfg(windows)]
 mod screen_capture;
-
-/// 写调试日志到用户目录
-pub fn debug_log(msg: &str) {
-    if let Some(local_dir) = dirs::data_local_dir() {
-        let log_dir = local_dir.join("Dictyy");
-        let _ = std::fs::create_dir_all(&log_dir);
-        let log_file = log_dir.join("debug.log");
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_file) {
-            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-            let _ = writeln!(file, "[{}] {}", timestamp, msg);
-        }
-    }
-}
-
-/// Tauri command: 写调试日志
-#[tauri::command]
-fn debug_log_cmd(msg: String) {
-    debug_log(&msg);
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -37,7 +17,11 @@ pub fn run() {
                 .target(tauri_plugin_log::Target::new(
                     tauri_plugin_log::TargetKind::LogDir { file_name: None },
                 ))
-                .level(log::LevelFilter::Info)
+                .level(if cfg!(debug_assertions) {
+                    log::LevelFilter::Debug  // 开发模式显示 DEBUG
+                } else {
+                    log::LevelFilter::Info   // 生产模式只显示 INFO+
+                })
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
@@ -55,7 +39,6 @@ pub fn run() {
         .manage(dictionary::DictionaryState::new())
         .manage(llm::LlmState::new())
         .invoke_handler(tauri::generate_handler![
-            debug_log_cmd,
             shortcuts::setup_shortcuts,
             dictionary::lookup_word,
             dictionary::search_words,
@@ -71,53 +54,53 @@ pub fn run() {
             screen_capture::get_screen_capture_enabled
         ])
         .setup(|app| {
-            debug_log("Setup starting...");
+            info!("Application setup starting...");
             let handle = app.handle();
 
             // Initialize dictionary
-            debug_log("Initializing dictionary...");
+            info!("Initializing dictionary module...");
             if let Err(e) = dictionary::init_dictionary(handle) {
-                debug_log(&format!("ERROR: Failed to initialize dictionary: {}", e));
+                error!("Failed to initialize dictionary: {}", e);
             } else {
-                debug_log("Dictionary initialized successfully");
+                info!("Dictionary initialized successfully");
             }
 
             // Initialize LLM
-            debug_log("Initializing LLM...");
+            info!("Initializing LLM module...");
             if let Err(e) = llm::init_llm(handle) {
-                debug_log(&format!("ERROR: Failed to initialize LLM: {}", e));
+                error!("Failed to initialize LLM: {}", e);
             } else {
-                debug_log("LLM initialized successfully");
+                info!("LLM initialized successfully");
             }
 
             // Initialize system tray
-            debug_log("Initializing tray...");
+            info!("Initializing system tray...");
             if let Err(e) = tray::init_tray(handle) {
-                debug_log(&format!("ERROR: Failed to initialize tray: {}", e));
+                error!("Failed to initialize tray: {}", e);
             } else {
-                debug_log("Tray initialized successfully");
+                info!("System tray initialized successfully");
             }
 
             // Initialize default shortcuts
-            debug_log("Initializing shortcuts...");
+            info!("Initializing shortcuts...");
             if let Err(e) = shortcuts::init_shortcuts(handle) {
-                debug_log(&format!("ERROR: Failed to initialize shortcuts: {}", e));
+                error!("Failed to initialize shortcuts: {}", e);
             } else {
-                debug_log("Shortcuts initialized successfully");
+                info!("Shortcuts initialized successfully");
             }
 
             // Initialize screen capture (Windows only)
             #[cfg(windows)]
             {
-                debug_log("Initializing screen capture...");
+                info!("Initializing screen capture...");
                 if let Err(e) = screen_capture::init_screen_capture(handle) {
-                    debug_log(&format!("ERROR: Failed to initialize screen capture: {}", e));
+                    error!("Failed to initialize screen capture: {}", e);
                 } else {
-                    debug_log("Screen capture initialized successfully");
+                    info!("Screen capture initialized successfully");
                 }
             }
 
-            debug_log("Setup completed");
+            info!("Application setup completed successfully");
 
             // Setup window close interception - hide instead of close
             if let Some(window) = app.get_webview_window("main") {
