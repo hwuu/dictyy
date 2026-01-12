@@ -178,24 +178,30 @@ fn start_polling() -> Result<(), String> {
                     cached_clipboard_text = None;
                     (None, uia_error.focus_changed)
                 } else {
-                    // 应该回退，检查冷却时间
-                    let can_fallback = last_clipboard_fallback
-                        .map(|t| t.elapsed() >= Duration::from_secs(1))
-                        .unwrap_or(true);
-
-                    if can_fallback {
-                        if uia_error.focus_changed {
-                            warn!("Using clipboard fallback for: class='{}', name='{}'",
-                                uia_error.class_name, uia_error.window_name);
-                        }
-                        last_clipboard_fallback = Some(Instant::now());
-                        let result = get_selected_text_with_clipboard();
-                        // 缓存结果
-                        cached_clipboard_text = result.clone();
-                        (result, uia_error.focus_changed)
+                    // 应该回退，但只有在焦点稳定时才触发 Ctrl+C
+                    // 避免焦点刚变化时就触发，因为可能没有选中文本
+                    if uia_error.focus_changed {
+                        // 焦点刚变化，不触发 Ctrl+C，清除缓存
+                        cached_clipboard_text = None;
+                        (None, true)
                     } else {
-                        // 冷却中，返回缓存的结果（保持状态）
-                        (cached_clipboard_text.clone(), false)
+                        // 焦点稳定，检查冷却时间
+                        let can_fallback = last_clipboard_fallback
+                            .map(|t| t.elapsed() >= Duration::from_secs(1))
+                            .unwrap_or(true);
+
+                        if can_fallback {
+                            debug!("Using clipboard fallback for: class='{}', name='{}'",
+                                uia_error.class_name, uia_error.window_name);
+                            last_clipboard_fallback = Some(Instant::now());
+                            let result = get_selected_text_with_clipboard();
+                            // 缓存结果
+                            cached_clipboard_text = result.clone();
+                            (result, false)
+                        } else {
+                            // 冷却中，返回缓存的结果（保持状态）
+                            (cached_clipboard_text.clone(), false)
+                        }
                     }
                 }
             }
