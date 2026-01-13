@@ -95,17 +95,34 @@ fn get_process_name(pid: u32) -> Option<String> {
     }
 }
 
-/// 检测是否为 Edge PDF（通过进程名和元素名）
-fn is_edge_pdf(element_name: &str, pid: u32) -> bool {
+/// 检查是否应该跳过 clipboard fallback（黑名单：Terminal 等会被干扰的应用）
+fn should_skip_clipboard_fallback(element_name: &str, pid: u32) -> bool {
     let name_lower = element_name.to_lowercase();
 
-    if let Some(process_name) = get_process_name(pid) {
-        let is_edge = process_name.contains("msedge") || process_name.contains("edge");
-        let is_pdf_page = name_lower.contains("页") ||
-                          name_lower.starts_with("page ") ||
-                          name_lower.is_empty();
-        return is_edge && is_pdf_page;
+    // 获取进程名
+    let process_name = get_process_name(pid).unwrap_or_default().to_lowercase();
+
+    // Terminal 类应用（Ctrl+Insert 可能会干扰）
+    if process_name.contains("terminal") ||
+       process_name.contains("powershell") ||
+       process_name.contains("cmd") ||
+       process_name.contains("wt") ||  // Windows Terminal
+       process_name.contains("console") ||
+       process_name.contains("bash") ||
+       name_lower.contains("terminal") ||
+       name_lower.contains("powershell") ||
+       name_lower.contains("command prompt") {
+        return true;
     }
+
+    // 桌面和任务栏等系统组件
+    if name_lower.contains("桌面") ||
+       name_lower.contains("desktop") ||
+       name_lower.contains("taskbar") ||
+       name_lower.contains("任务栏") {
+        return true;
+    }
+
     false
 }
 
@@ -158,11 +175,19 @@ fn start_polling() -> Result<(), String> {
                 (result.text, result.focus_changed)
             }
             Err(uia_error) => {
-                // UIA 失败，只对 Edge PDF 使用 Ctrl+Insert fallback
-                // 其他不支持 TextPattern 的应用不轮询检测（只在快捷键触发时处理）
+                // UIA 失败，检查是否应该跳过 clipboard fallback
+                let should_skip = should_skip_clipboard_fallback(&uia_error.element_name, uia_error.pid);
 
-                if is_edge_pdf(&uia_error.element_name, uia_error.pid) {
-                    // Edge PDF：使用 Ctrl+Insert fallback 轮询
+                if should_skip {
+                    // 黑名单中的应用（Terminal 等）：不使用 clipboard fallback
+                    if uia_error.focus_changed {
+                        debug!("Skipping clipboard fallback for: name='{}', pid={}", uia_error.element_name, uia_error.pid);
+                    }
+                    cached_clipboard_text = None;
+                    last_clipboard_empty_time = None;
+                    (None, uia_error.focus_changed)
+                } else {
+                    // 其他应用：使用 Ctrl+Insert fallback
                     if uia_error.focus_changed {
                         // 焦点刚变化，不触发 Ctrl+Insert，清除缓存和空结果时间
                         cached_clipboard_text = None;
@@ -171,11 +196,11 @@ fn start_polling() -> Result<(), String> {
                     } else {
                         // 焦点稳定，检查是否最近刚尝试过且返回空
                         let recently_empty = last_clipboard_empty_time
-                            .map(|t| t.elapsed() < Duration::from_secs(5))
+                            .map(|t| t.elapsed() < Duration::from_millis(1500))
                             .unwrap_or(false);
 
                         if recently_empty {
-                            // 最近（5秒内）尝试过且返回空，不再重复尝试
+                            // 最近（1.5秒内）尝试过且返回空，不再重复尝试
                             (None, false)
                         } else {
                             // 可以尝试，检查冷却时间
@@ -184,7 +209,7 @@ fn start_polling() -> Result<(), String> {
                                 .unwrap_or(true);
 
                             if can_fallback {
-                                debug!("Using clipboard fallback for Edge PDF");
+                                debug!("Using clipboard fallback");
                                 last_clipboard_fallback = Some(Instant::now());
                                 let result = get_selected_text_with_clipboard();
 
@@ -205,12 +230,6 @@ fn start_polling() -> Result<(), String> {
                             }
                         }
                     }
-                } else {
-                    // 其他不支持 TextPattern 的应用：不使用 fallback 轮询
-                    // 清除缓存和状态
-                    cached_clipboard_text = None;
-                    last_clipboard_empty_time = None;
-                    (None, uia_error.focus_changed)
                 }
             }
         };
@@ -265,17 +284,24 @@ fn start_polling() -> Result<(), String> {
                             bubble_shown_for = None;
                         }
                     }
-                } else if let Some(start_time) = last_text_time {
-                    // 文本没变，检查是否稳定了 200ms
-                    if start_time.elapsed() >= Duration::from_millis(200) {
-                        // 稳定了，显示气泡（如果还没显示）
-                        if bubble_shown_for.as_ref() != Some(&text) {
-                            // 使用首次检测时保存的 bounds，而不是当前的 bounds
-                            let saved_bounds = last_text.as_ref().and_then(|(_, b)| b.clone());
-                            debug!("Showing bubble for text: '{}', bounds: {:?}", text, saved_bounds.as_ref().map(|b| (b.left, b.top, b.right, b.bottom)));
-                            show_bubble(&text, saved_bounds);
-                            bubble_shown_for = Some(text.clone());
+                } else {
+                    // 文本没变
+                    if let Some(start_time) = last_text_time {
+                        // 已经开始计时，检查是否稳定了 500ms
+                        if start_time.elapsed() >= Duration::from_millis(500) {
+                            // 稳定了，显示气泡（如果还没显示）
+                            if bubble_shown_for.as_ref() != Some(&text) {
+                                // 使用首次检测时保存的 bounds，而不是当前的 bounds
+                                let saved_bounds = last_text.as_ref().and_then(|(_, b)| b.clone());
+                                debug!("Showing bubble for text: '{}', bounds: {:?}", text, saved_bounds.as_ref().map(|b| (b.left, b.top, b.right, b.bottom)));
+                                show_bubble(&text, saved_bounds);
+                                bubble_shown_for = Some(text.clone());
+                            }
                         }
+                    } else {
+                        // 还没开始计时（焦点变化时记录的文本），但文本稳定，现在开始计时
+                        debug!("Text stable after focus change, starting timer: '{}'", text);
+                        last_text_time = Some(Instant::now());
                     }
                 }
             }
@@ -674,30 +700,54 @@ pub fn get_current_selected_text() -> Option<String> {
     // 获取焦点元素
     let focused = unsafe { automation.GetFocusedElement().ok()? };
 
+    // 获取焦点元素信息（用于 fallback 判断）
+    let element_name = unsafe { focused.CurrentName().unwrap_or_default().to_string() };
+    let element_pid = unsafe { focused.CurrentProcessId().unwrap_or_default() as u32 };
+
     // 尝试获取 TextPattern
-    let pattern_obj = unsafe { focused.GetCurrentPattern(UIA_TextPatternId).ok()? };
-    let text_pattern: IUIAutomationTextPattern = pattern_obj.cast().ok()?;
+    let text_pattern_result = unsafe {
+        focused.GetCurrentPattern(UIA_TextPatternId)
+            .and_then(|pattern_obj| pattern_obj.cast::<IUIAutomationTextPattern>())
+    };
 
-    // 获取选中的文本范围
-    let selection = unsafe { text_pattern.GetSelection().ok()? };
-    let count = unsafe { selection.Length().ok()? };
+    match text_pattern_result {
+        Ok(text_pattern) => {
+            // TextPattern 可用，尝试获取选中文本
+            let selection = unsafe { text_pattern.GetSelection().ok()? };
+            let count = unsafe { selection.Length().ok()? };
 
-    if count == 0 {
-        return None;
+            if count == 0 {
+                return None;
+            }
+
+            let range = unsafe { selection.GetElement(0).ok()? };
+            let text_bstr = unsafe { range.GetText(-1).ok()? };
+            let text = text_bstr.to_string();
+
+            if text.is_empty() || !is_valid_word(&text) {
+                return None;
+            }
+
+            Some(text.trim().to_string())
+        }
+        Err(_) => {
+            // TextPattern 不可用，检查是否应该使用 clipboard fallback
+            if should_skip_clipboard_fallback(&element_name, element_pid) {
+                return None;
+            }
+
+            // 使用 Ctrl+Insert fallback
+            debug!("Using clipboard fallback for shortcut trigger");
+            let result = get_selected_text_with_clipboard()?;
+            let text = result.0;
+
+            if is_valid_word(&text) {
+                Some(text.trim().to_string())
+            } else {
+                None
+            }
+        }
     }
-
-    // 获取第一个选中范围
-    let range = unsafe { selection.GetElement(0).ok()? };
-
-    // 获取文本
-    let text_bstr = unsafe { range.GetText(-1).ok()? };
-    let text = text_bstr.to_string();
-
-    if text.is_empty() || !is_valid_word(&text) {
-        return None;
-    }
-
-    Some(text.trim().to_string())
 }
 
 /// 使用 Ctrl+Insert 方案获取选中文本（UIA 失败时的回退方案）

@@ -40,6 +40,22 @@
 
 ## 常见问题记录
 
+### 屏幕取词 Clipboard Fallback 策略
+
+**问题**：某些应用（如知乎网页、Edge PDF）不支持 UI Automation TextPattern，需要使用 Ctrl+Insert 作为 fallback。
+
+**解决方案**：
+- 对所有不支持 TextPattern 的应用默认使用 Ctrl+Insert fallback
+- 黑名单排除：Terminal、PowerShell、CMD、桌面、任务栏等（Ctrl+Insert 可能干扰这些应用）
+
+**实现细节**：
+- `should_skip_clipboard_fallback()` 函数检查应用是否在黑名单中
+- 通过进程名和元素名判断（如 `terminal`, `powershell`, `cmd` 等）
+
+**影响模块**：`src-tauri/src/screen_capture.rs`
+
+---
+
 ### Tauri v2 前端 Window API 权限问题
 
 **问题**：Tauri v2 前端调用 `window.hide()`、`window.show()` 等 API 不生效，Esc 键无法隐藏窗口。
