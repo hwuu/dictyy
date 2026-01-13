@@ -1,7 +1,7 @@
 //! 屏幕取词模块
 //!
 //! 使用 UI Automation API 轮询获取选中文本。
-//! 当 UIA 不支持时，回退到 Ctrl+C 方案。
+//! 当 UIA 不支持时，回退到 Ctrl+Insert 方案。
 //! 当选中文本稳定 500ms 后显示气泡，文本变化或清空时关闭气泡。
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,10 +18,11 @@ use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationTextPattern, UIA_TextPatternId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_C, VK_CONTROL,
+    SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_CONTROL, VK_INSERT,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use windows::Win32::Foundation::POINT;
+use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
 
 use log::{debug, info, warn};
 
@@ -75,6 +76,39 @@ pub fn init_screen_capture(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 获取进程名称（通过 PID）
+fn get_process_name(pid: u32) -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::System::Threading::PROCESS_NAME_WIN32;
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buffer = [0u16; 1024];
+        let mut size = buffer.len() as u32;
+
+        if QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR::from_raw(buffer.as_mut_ptr()), &mut size).is_ok() {
+            let path = String::from_utf16_lossy(&buffer[..size as usize]);
+            path.split('\\').last().map(|s| s.to_lowercase())
+        } else {
+            None
+        }
+    }
+}
+
+/// 检测是否为 Edge PDF（通过进程名和元素名）
+fn is_edge_pdf(element_name: &str, pid: u32) -> bool {
+    let name_lower = element_name.to_lowercase();
+
+    if let Some(process_name) = get_process_name(pid) {
+        let is_edge = process_name.contains("msedge") || process_name.contains("edge");
+        let is_pdf_page = name_lower.contains("页") ||
+                          name_lower.starts_with("page ") ||
+                          name_lower.is_empty();
+        return is_edge && is_pdf_page;
+    }
+    false
+}
+
 /// 启动轮询
 fn start_polling() -> Result<(), String> {
     info!("Starting text selection polling...");
@@ -101,54 +135,12 @@ fn start_polling() -> Result<(), String> {
     let mut last_text_time: Option<Instant> = None;
     let mut bubble_shown_for: Option<String> = None;
     // DEBUG: 上次焦点信息，用于减少重复日志
-    let mut last_focus_info: Option<(String, i32)> = None;
-    // Ctrl+C 回退相关
+    let mut last_focus_info: Option<(String, u32)> = None;
+    // Ctrl+Insert 回退相关
     let mut last_clipboard_fallback: Option<Instant> = None;
     let mut cached_clipboard_text: Option<(String, Option<TextBounds>)> = None;
-
-    // 应该触发 Ctrl+C 回退的控件类型
-    // Document=50030, Edit=50004, Text=50020, Pane=50033, Window=50032, Group=50026
-    let should_fallback_to_clipboard = |control_type: i32| -> bool {
-        matches!(control_type, 50030 | 50004 | 50020 | 50033 | 50032 | 50026)
-    };
-
-    // 检查是否应该跳过 Ctrl+C（Terminal 类应用、桌面、任务栏等系统组件）
-    let should_skip_clipboard_fallback = |window_name: &str, class_name: &str| -> bool {
-        let name_lower = window_name.to_lowercase();
-        let class_lower = class_name.to_lowercase();
-
-        // Terminal 类应用（Ctrl+C 会中断程序）
-        if name_lower.contains("terminal") ||
-           name_lower.contains("powershell") ||
-           name_lower.contains("cmd.exe") ||
-           name_lower.contains("command prompt") ||
-           name_lower.contains("console") ||
-           name_lower.contains("warp") ||
-           name_lower.contains("alacritty") ||
-           name_lower.contains("iterm") ||
-           class_lower.contains("terminal") ||
-           class_lower.contains("console") ||
-           class_lower.contains("mintty") ||  // Git Bash
-           class_lower.contains("foregroundstaging") {  // Windows Terminal
-            return true;
-        }
-
-        // Windows Terminal 的输入框组件
-        if class_lower.contains("windows.ui.input.inputsite") {
-            return true;
-        }
-
-        // 桌面和任务栏等系统组件
-        if class_lower.starts_with("#32769") ||  // Desktop
-           name_lower.contains("桌面") ||
-           name_lower.contains("desktop") ||
-           name_lower.contains("taskbar") ||
-           name_lower.contains("任务栏") {
-            return true;
-        }
-
-        false
-    };
+    // 记录上次 clipboard 返回空的时间（用于避免频繁重试）
+    let mut last_clipboard_empty_time: Option<Instant> = None;
 
     loop {
         thread::sleep(Duration::from_millis(200)); // 200ms 轮询间隔
@@ -157,52 +149,68 @@ fn start_polling() -> Result<(), String> {
             continue;
         }
 
-        // 获取当前选中文本（优先 UIA，失败则回退到 Ctrl+C）
+        // 获取当前选中文本（优先 UIA，失败则回退到 Ctrl+Insert）
         let (current, focus_changed): (Option<(String, Option<TextBounds>)>, bool) = match get_selected_text_with_automation(&automation, &mut last_focus_info) {
             Ok(result) => {
-                // UIA 成功，清除 Ctrl+C 缓存
+                // UIA 成功，清除 Ctrl+Insert 缓存和空结果时间
                 cached_clipboard_text = None;
+                last_clipboard_empty_time = None;
                 (result.text, result.focus_changed)
             }
             Err(uia_error) => {
-                // UIA 失败，检查控件类型是否应该回退到 Ctrl+C
-                // 同时排除 Terminal 类应用、桌面等系统组件（Ctrl+C 会中断程序或无意义）
-                let should_skip = should_skip_clipboard_fallback(&uia_error.window_name, &uia_error.class_name);
-                if should_skip && uia_error.focus_changed {
-                    debug!("Skipping clipboard fallback for: class='{}', name='{}'",
-                        uia_error.class_name, uia_error.window_name);
-                }
+                // UIA 失败，只对 Edge PDF 使用 Ctrl+Insert fallback
+                // 其他不支持 TextPattern 的应用不轮询检测（只在快捷键触发时处理）
 
-                if !should_fallback_to_clipboard(uia_error.control_type) || should_skip {
-                    // 不应该回退（控件类型不对，或是 Terminal/桌面等系统组件）
-                    cached_clipboard_text = None;
-                    (None, uia_error.focus_changed)
-                } else {
-                    // 应该回退，但只有在焦点稳定时才触发 Ctrl+C
-                    // 避免焦点刚变化时就触发，因为可能没有选中文本
+                if is_edge_pdf(&uia_error.element_name, uia_error.pid) {
+                    // Edge PDF：使用 Ctrl+Insert fallback 轮询
                     if uia_error.focus_changed {
-                        // 焦点刚变化，不触发 Ctrl+C，清除缓存
+                        // 焦点刚变化，不触发 Ctrl+Insert，清除缓存和空结果时间
                         cached_clipboard_text = None;
+                        last_clipboard_empty_time = None;
                         (None, true)
                     } else {
-                        // 焦点稳定，检查冷却时间
-                        let can_fallback = last_clipboard_fallback
-                            .map(|t| t.elapsed() >= Duration::from_secs(1))
-                            .unwrap_or(true);
+                        // 焦点稳定，检查是否最近刚尝试过且返回空
+                        let recently_empty = last_clipboard_empty_time
+                            .map(|t| t.elapsed() < Duration::from_secs(5))
+                            .unwrap_or(false);
 
-                        if can_fallback {
-                            debug!("Using clipboard fallback for: class='{}', name='{}'",
-                                uia_error.class_name, uia_error.window_name);
-                            last_clipboard_fallback = Some(Instant::now());
-                            let result = get_selected_text_with_clipboard();
-                            // 缓存结果
-                            cached_clipboard_text = result.clone();
-                            (result, false)
+                        if recently_empty {
+                            // 最近（5秒内）尝试过且返回空，不再重复尝试
+                            (None, false)
                         } else {
-                            // 冷却中，返回缓存的结果（保持状态）
-                            (cached_clipboard_text.clone(), false)
+                            // 可以尝试，检查冷却时间
+                            let can_fallback = last_clipboard_fallback
+                                .map(|t| t.elapsed() >= Duration::from_secs(1))
+                                .unwrap_or(true);
+
+                            if can_fallback {
+                                debug!("Using clipboard fallback for Edge PDF");
+                                last_clipboard_fallback = Some(Instant::now());
+                                let result = get_selected_text_with_clipboard();
+
+                                // 如果返回空，记录时间
+                                if result.is_none() {
+                                    last_clipboard_empty_time = Some(Instant::now());
+                                } else {
+                                    // 有结果，清除空结果时间
+                                    last_clipboard_empty_time = None;
+                                }
+
+                                // 缓存结果
+                                cached_clipboard_text = result.clone();
+                                (result, false)
+                            } else {
+                                // 冷却中，返回缓存的结果（保持状态）
+                                (cached_clipboard_text.clone(), false)
+                            }
                         }
                     }
+                } else {
+                    // 其他不支持 TextPattern 的应用：不使用 fallback 轮询
+                    // 清除缓存和状态
+                    cached_clipboard_text = None;
+                    last_clipboard_empty_time = None;
+                    (None, uia_error.focus_changed)
                 }
             }
         };
@@ -308,12 +316,11 @@ fn close_bubble() {
     *current = None;
 }
 
-/// UIA 失败时的错误信息，包含控件类型用于判断是否回退
+/// UIA 失败时的错误信息
 struct UiaError {
-    control_type: i32,
     focus_changed: bool,
-    window_name: String,
-    class_name: String,
+    element_name: String,
+    pid: u32,
     #[allow(dead_code)]
     message: String,
 }
@@ -327,19 +334,19 @@ struct UiaSuccess {
 /// 使用 UI Automation 获取选中文本及其位置（复用 automation 实例）
 fn get_selected_text_with_automation(
     automation: &IUIAutomation,
-    last_focus_info: &mut Option<(String, i32)>,
+    last_focus_info: &mut Option<(String, u32)>,
 ) -> Result<UiaSuccess, UiaError> {
     unsafe {
         // 获取焦点元素
         let focused = automation
             .GetFocusedElement()
-            .map_err(|e| UiaError { control_type: 0, focus_changed: false, window_name: String::new(), class_name: String::new(), message: format!("GetFocusedElement failed: {:?}", e) })?;
+            .map_err(|e| UiaError { focus_changed: false, element_name: String::new(), pid: 0, message: format!("GetFocusedElement failed: {:?}", e) })?;
 
         // 获取焦点元素的信息
         let class_name = focused.CurrentClassName().unwrap_or_default().to_string();
         let control_type = focused.CurrentControlType().unwrap_or_default().0 as i32;
         let name = focused.CurrentName().unwrap_or_default().to_string();
-        let pid = focused.CurrentProcessId().unwrap_or_default();
+        let pid = focused.CurrentProcessId().unwrap_or_default() as u32;
 
         // 只在焦点变化时打印日志
         let current_focus = (name.clone(), pid);
@@ -366,7 +373,7 @@ fn get_selected_text_with_automation(
                     debug!("TextPattern not supported: {:?}", e);
                     *last_focus_info = Some(current_focus);
                 }
-                return Err(UiaError { control_type, focus_changed, window_name: name, class_name, message: format!("GetCurrentPattern failed: {:?}", e) });
+                return Err(UiaError { focus_changed, element_name: name, pid, message: format!("GetCurrentPattern failed: {:?}", e) });
             }
         };
 
@@ -377,7 +384,7 @@ fn get_selected_text_with_automation(
                     debug!("Cast to TextPattern failed: {:?}", e);
                     *last_focus_info = Some(current_focus);
                 }
-                return Err(UiaError { control_type, focus_changed, window_name: name, class_name, message: format!("Cast to TextPattern failed: {:?}", e) });
+                return Err(UiaError { focus_changed, element_name: name, pid, message: format!("Cast to TextPattern failed: {:?}", e) });
             }
         };
 
@@ -605,7 +612,52 @@ pub fn get_screen_capture_enabled() -> bool {
     is_enabled()
 }
 
-/// 使用 Ctrl+C 方案获取选中文本（UIA 失败时的回退方案）
+/// 获取当前焦点的选中文本（同步调用，用于快捷键触发）
+pub fn get_current_selected_text() -> Option<String> {
+    // 初始化 COM（如果还没有初始化）
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    }
+
+    // 创建 UI Automation 实例
+    let automation: IUIAutomation = unsafe {
+        windows::Win32::System::Com::CoCreateInstance(
+            &CUIAutomation,
+            None,
+            windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
+        ).ok()?
+    };
+
+    // 获取焦点元素
+    let focused = unsafe { automation.GetFocusedElement().ok()? };
+
+    // 尝试获取 TextPattern
+    let pattern_obj = unsafe { focused.GetCurrentPattern(UIA_TextPatternId).ok()? };
+    let text_pattern: IUIAutomationTextPattern = pattern_obj.cast().ok()?;
+
+    // 获取选中的文本范围
+    let selection = unsafe { text_pattern.GetSelection().ok()? };
+    let count = unsafe { selection.Length().ok()? };
+
+    if count == 0 {
+        return None;
+    }
+
+    // 获取第一个选中范围
+    let range = unsafe { selection.GetElement(0).ok()? };
+
+    // 获取文本
+    let text_bstr = unsafe { range.GetText(-1).ok()? };
+    let text = text_bstr.to_string();
+
+    if text.is_empty() || !is_valid_word(&text) {
+        return None;
+    }
+
+    Some(text.trim().to_string())
+}
+
+/// 使用 Ctrl+Insert 方案获取选中文本（UIA 失败时的回退方案）
 fn get_selected_text_with_clipboard() -> Option<(String, Option<TextBounds>)> {
     use clipboard_win::{formats, get_clipboard, set_clipboard};
 
@@ -615,7 +667,7 @@ fn get_selected_text_with_clipboard() -> Option<(String, Option<TextBounds>)> {
     // 2. 清空剪贴板（用于检测是否有新内容）
     let _ = set_clipboard(formats::Unicode, "");
 
-    // 3. 模拟 Ctrl+C
+    // 3. 模拟 Ctrl+Insert
     unsafe {
         let inputs = [
             // Ctrl down
@@ -631,12 +683,12 @@ fn get_selected_text_with_clipboard() -> Option<(String, Option<TextBounds>)> {
                     },
                 },
             },
-            // C down
+            // Insert down
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT {
-                        wVk: VK_C,
+                        wVk: VK_INSERT,
                         wScan: 0,
                         dwFlags: KEYBD_EVENT_FLAGS(0),
                         time: 0,
@@ -644,12 +696,12 @@ fn get_selected_text_with_clipboard() -> Option<(String, Option<TextBounds>)> {
                     },
                 },
             },
-            // C up
+            // Insert up
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     ki: KEYBDINPUT {
-                        wVk: VK_C,
+                        wVk: VK_INSERT,
                         wScan: 0,
                         dwFlags: KEYEVENTF_KEYUP,
                         time: 0,
@@ -686,7 +738,7 @@ fn get_selected_text_with_clipboard() -> Option<(String, Option<TextBounds>)> {
         let _ = set_clipboard(formats::Unicode, &saved);
     }
 
-    // 7. 获取鼠标位置作为气泡显示位置（因为 Ctrl+C 回退无法获取精确文本边界）
+    // 7. 获取鼠标位置作为气泡显示位置（因为 Ctrl+Insert 回退无法获取精确文本边界）
     let bounds = get_mouse_position();
 
     // 检查是否获取到新文本
@@ -715,7 +767,7 @@ fn get_focused_element_bounds(automation: &IUIAutomation) -> Option<TextBounds> 
     }
 }
 
-/// 获取鼠标位置（用于 Ctrl+C 回退方案）
+/// 获取鼠标位置（用于 Ctrl+Insert 回退方案）
 fn get_mouse_position() -> Option<TextBounds> {
     unsafe {
         let mut point = POINT::default();

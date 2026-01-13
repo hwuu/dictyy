@@ -5,6 +5,9 @@
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
+#[cfg(windows)]
+use crate::screen_capture;
+
 /// Default shortcut key
 pub const DEFAULT_SHORTCUT: &str = "Ctrl+`";
 
@@ -52,14 +55,45 @@ pub async fn setup_shortcuts<R: Runtime>(
 /// Toggle window visibility
 fn toggle_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
-        if window.is_visible().unwrap_or(false) {
-            let _ = window.hide();
+        let is_visible = window.is_visible().unwrap_or(false);
+
+        // 尝试获取当前选中的文本
+        #[cfg(windows)]
+        let selected_text = screen_capture::get_current_selected_text();
+        #[cfg(not(windows))]
+        let selected_text: Option<String> = None;
+
+        if is_visible {
+            // 窗口已可见
+            if let Some(word) = selected_text {
+                // 有选中文本 → 查询新单词（不隐藏窗口）
+                #[derive(serde::Serialize, Clone)]
+                struct ShowWordDetail {
+                    word: String,
+                }
+                let _ = window.set_focus();
+                let _ = app.emit("show-word-detail", ShowWordDetail { word });
+            } else {
+                // 没有选中文本 → 隐藏窗口
+                let _ = window.hide();
+            }
         } else {
+            // 窗口不可见 → 显示窗口
             let _ = window.show();
             let _ = window.unminimize();
             let _ = window.set_focus();
-            // Notify frontend to focus input
-            let _ = app.emit("new-query", ());
+
+            // 如果有选中的文本，发送 show-word-detail 事件进行查询
+            // 否则发送 new-query 事件聚焦输入框
+            if let Some(word) = selected_text {
+                #[derive(serde::Serialize, Clone)]
+                struct ShowWordDetail {
+                    word: String,
+                }
+                let _ = app.emit("show-word-detail", ShowWordDetail { word });
+            } else {
+                let _ = app.emit("new-query", ());
+            }
         }
     }
 }
