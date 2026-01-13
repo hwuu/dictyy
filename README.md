@@ -8,7 +8,7 @@ Windows 桌面词典应用，基于 Tauri v2 + React 19 + TypeScript 构建。
 - LLM 回退（词典未收录时自动调用 LLM）
 - 模糊匹配建议（支持拼写纠错）
 - 屏幕取词（选中文本自动弹出释义气泡）
-- 全局快捷键唤起（Ctrl+`）
+- 全局快捷键（Ctrl+` 唤起窗口或查询选中文本）
 - 系统托盘支持
 
 ## 安装
@@ -39,7 +39,7 @@ llm:
 
 ### 日志
 
-日志文件位于 `%LOCALAPPDATA%\Dictyy\debug.log`。
+日志文件位于 `%LOCALAPPDATA%\Dictyy\logs\Dictyy.log`（即 `C:\Users\<用户名>\AppData\Local\Dictyy\logs\Dictyy.log`）。
 
 ## 开发
 
@@ -97,7 +97,7 @@ npm run tauri build
 
 | 快捷键 | 功能 |
 |--------|------|
-| Ctrl+` | 显示/隐藏窗口 |
+| Ctrl+` | 智能切换窗口<br>• 窗口不可见 → 显示窗口（有选中文本则查询，无则聚焦输入框）<br>• 窗口可见 + 有选中文本 → 查询新单词<br>• 窗口可见 + 无选中文本 → 隐藏窗口 |
 | ↑/↓ | 选择搜索建议 |
 | Tab | 补全选中建议 |
 | Enter | 查询 |

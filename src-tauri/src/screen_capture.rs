@@ -612,8 +612,51 @@ pub fn get_screen_capture_enabled() -> bool {
     is_enabled()
 }
 
+/// 检查焦点是否在当前应用（用于判断是否应该获取外部选中文本）
+pub fn is_focus_in_current_app() -> bool {
+    // 初始化 COM（如果还没有初始化）
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    }
+
+    // 创建 UI Automation 实例
+    let automation: IUIAutomation = unsafe {
+        match windows::Win32::System::Com::CoCreateInstance(
+            &CUIAutomation,
+            None,
+            windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
+        ) {
+            Ok(a) => a,
+            Err(_) => return false,
+        }
+    };
+
+    // 获取焦点元素
+    let focused = unsafe {
+        match automation.GetFocusedElement() {
+            Ok(f) => f,
+            Err(_) => return false,
+        }
+    };
+
+    // 获取焦点元素的进程ID
+    let focused_pid = unsafe { focused.CurrentProcessId().unwrap_or_default() as u32 };
+
+    // 获取当前进程ID
+    let current_pid = std::process::id();
+
+    // 如果焦点进程ID等于当前进程ID，说明焦点在当前应用
+    focused_pid == current_pid
+}
+
 /// 获取当前焦点的选中文本（同步调用，用于快捷键触发）
+/// 如果焦点在当前应用，返回 None（避免获取自己窗口的文本）
 pub fn get_current_selected_text() -> Option<String> {
+    // 如果焦点在当前应用，不获取文本
+    if is_focus_in_current_app() {
+        return None;
+    }
+
     // 初始化 COM（如果还没有初始化）
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
