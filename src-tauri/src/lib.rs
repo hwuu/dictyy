@@ -1,5 +1,6 @@
 use log::{error, info};
 use tauri::{Manager, WindowEvent};
+use std::path::PathBuf;
 
 mod dictionary;
 mod llm;
@@ -10,12 +11,20 @@ mod screen_capture;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 构建日志目录路径：%LOCALAPPDATA%\Dictyy\logs
+    let log_dir = dirs::data_local_dir()
+        .map(|d| d.join("Dictyy").join("logs"))
+        .unwrap_or_else(|| PathBuf::from("logs"));
+
     tauri::Builder::default()
         // 日志插件需要最先初始化
         .plugin(
             tauri_plugin_log::Builder::new()
                 .target(tauri_plugin_log::Target::new(
-                    tauri_plugin_log::TargetKind::LogDir { file_name: None },
+                    tauri_plugin_log::TargetKind::Folder {
+                        path: log_dir,
+                        file_name: Some("Dictyy".to_string()),
+                    },
                 ))
                 .level(if cfg!(debug_assertions) {
                     log::LevelFilter::Debug  // 开发模式显示 DEBUG
