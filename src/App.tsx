@@ -75,20 +75,44 @@ function App() {
     const unlisten = listen<{ word: string }>("show-word-detail", async (event) => {
       console.log("[App] Received show-word-detail event:", event.payload);
       const wordToSearch = event.payload.word;
+      console.log("[App] Word to search:", wordToSearch);
+
       // 显示主窗口
-      const window = getCurrentWindow();
-      await window.show();
-      await window.setFocus();
-      console.log("[App] Window shown and focused");
+      try {
+        console.log("[App] Getting current window...");
+        const window = getCurrentWindow();
+        console.log("[App] Window label:", window.label);
+
+        console.log("[App] Calling window.show()...");
+        await window.show();
+        console.log("[App] window.show() completed");
+
+        console.log("[App] Calling window.unminimize()...");
+        await window.unminimize();
+        console.log("[App] window.unminimize() completed");
+
+        console.log("[App] Calling window.setFocus()...");
+        await window.setFocus();
+        console.log("[App] window.setFocus() completed");
+
+        console.log("[App] Window shown and focused");
+      } catch (error) {
+        console.error("[App] Failed to show/focus window:", error);
+        // 即使窗口操作失败，也继续查询
+      }
+
       // 设置输入框并查询（先设置 searchedWord 防止触发搜索建议）
+      console.log("[App] Setting state: searchedWord and word...");
       setSearchedWord(wordToSearch);
       setWord(wordToSearch);
+      console.log("[App] State set, calling doSearch...");
       if (doSearchRef.current) {
         console.log("[App] Calling doSearch with:", wordToSearch);
         doSearchRef.current(wordToSearch);
       } else {
         console.error("[App] doSearchRef.current is undefined!");
       }
+      console.log("[App] Event handler completed");
     });
 
     return () => {

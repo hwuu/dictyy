@@ -113,6 +113,7 @@
 
 ### 不要做
 
+- ❌ **不要自行执行 npm run m命令* - 提示我手动执行
 - ❌ **不要在 Terminal 中使用 Ctrl+Insert fallback** - 会被误解为粘贴命令，干扰用户操作
 - ❌ **不要在 TextPattern 可用时使用 clipboard fallback** - 性能差且有副作用
 - ❌ **不要在焦点变化时立即触发气泡** - 会在窗口切换时频繁弹出

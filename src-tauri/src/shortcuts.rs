@@ -2,6 +2,7 @@
 //!
 //! Handles Ctrl+` shortcut to toggle window visibility.
 
+use log::{info, warn};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
@@ -10,6 +11,35 @@ use crate::screen_capture;
 
 /// Default shortcut key
 pub const DEFAULT_SHORTCUT: &str = "Ctrl+`";
+
+/// Show main window and query a word
+/// Called from bubble window when user clicks "详细"
+#[tauri::command]
+pub async fn show_main_window<R: Runtime>(app: AppHandle<R>, word: String) -> Result<(), String> {
+    info!("[Rust] show_main_window called with word: {}", word);
+
+    if let Some(window) = app.get_webview_window("main") {
+        info!("[Rust] Found main window, emitting event...");
+
+        // 只发送事件，让前端负责显示窗口
+        #[derive(serde::Serialize, Clone)]
+        struct Payload {
+            word: String,
+        }
+        let payload = Payload { word: word.clone() };
+        window.emit("show-word-detail", payload)
+            .map_err(|e| {
+                warn!("[Rust] Failed to emit event: {}", e);
+                format!("Failed to emit event: {}", e)
+            })?;
+
+        info!("[Rust] Event emitted to main window");
+        Ok(())
+    } else {
+        warn!("[Rust] Main window not found");
+        Err("Main window not found".to_string())
+    }
+}
 
 /// Setup global shortcuts
 ///

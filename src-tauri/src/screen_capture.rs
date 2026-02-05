@@ -234,8 +234,9 @@ fn start_polling() -> Result<(), String> {
             }
         };
 
-        // 焦点变化时，关闭气泡并重置状态
+        // 焦点变化时关闭气泡并重置状态
         if focus_changed {
+            // 关闭气泡并重置状态
             if bubble_shown_for.is_some() {
                 close_bubble();
                 bubble_shown_for = None;
@@ -266,42 +267,27 @@ fn start_polling() -> Result<(), String> {
                 let text_changed = last_text.as_ref().map(|(t, _)| t) != Some(&text);
 
                 if text_changed {
-                    // 文本变化
-                    if focus_changed {
-                        // 焦点刚变化，只记录文本但不开始计时（忽略窗口切换时已选中的文本）
-                        debug!("Text detected after focus change (ignored): '{}'", text);
-                        last_text = Some((text.clone(), bounds));
-                        last_text_time = None;
-                    } else {
-                        // 焦点稳定，正常的文本变化，开始计时
-                        debug!("Text selection changed to: '{}'", text);
-                        last_text = Some((text.clone(), bounds));
-                        last_text_time = Some(Instant::now());
+                    // 文本变化，开始计时（所有场景统一处理）
+                    debug!("Text selection changed to: '{}'", text);
+                    last_text = Some((text.clone(), bounds));
+                    last_text_time = Some(Instant::now());
 
-                        // 如果气泡显示的是不同的词，关闭它
-                        if bubble_shown_for.as_ref() != Some(&text) && bubble_shown_for.is_some() {
-                            close_bubble();
-                            bubble_shown_for = None;
-                        }
+                    // 如果气泡显示的是不同的词，关闭它
+                    if bubble_shown_for.as_ref() != Some(&text) && bubble_shown_for.is_some() {
+                        close_bubble();
+                        bubble_shown_for = None;
                     }
-                } else {
-                    // 文本没变
-                    if let Some(start_time) = last_text_time {
-                        // 已经开始计时，检查是否稳定了 500ms
-                        if start_time.elapsed() >= Duration::from_millis(500) {
-                            // 稳定了，显示气泡（如果还没显示）
-                            if bubble_shown_for.as_ref() != Some(&text) {
-                                // 使用首次检测时保存的 bounds，而不是当前的 bounds
-                                let saved_bounds = last_text.as_ref().and_then(|(_, b)| b.clone());
-                                debug!("Showing bubble for text: '{}', bounds: {:?}", text, saved_bounds.as_ref().map(|b| (b.left, b.top, b.right, b.bottom)));
-                                show_bubble(&text, saved_bounds);
-                                bubble_shown_for = Some(text.clone());
-                            }
+                } else if let Some(start_time) = last_text_time {
+                    // 文本没变，检查是否稳定了 500ms
+                    if start_time.elapsed() >= Duration::from_millis(500) {
+                        // 稳定了，显示气泡（如果还没显示）
+                        if bubble_shown_for.as_ref() != Some(&text) {
+                            // 使用首次检测时保存的 bounds，而不是当前的 bounds
+                            let saved_bounds = last_text.as_ref().and_then(|(_, b)| b.clone());
+                            debug!("Showing bubble for text: '{}', bounds: {:?}", text, saved_bounds.as_ref().map(|b| (b.left, b.top, b.right, b.bottom)));
+                            show_bubble(&text, saved_bounds);
+                            bubble_shown_for = Some(text.clone());
                         }
-                    } else {
-                        // 还没开始计时（焦点变化时记录的文本），但文本稳定，现在开始计时
-                        debug!("Text stable after focus change, starting timer: '{}'", text);
-                        last_text_time = Some(Instant::now());
                     }
                 }
             }

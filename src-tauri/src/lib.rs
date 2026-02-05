@@ -49,6 +49,7 @@ pub fn run() {
         .manage(llm::LlmState::new())
         .invoke_handler(tauri::generate_handler![
             shortcuts::setup_shortcuts,
+            shortcuts::show_main_window,
             dictionary::lookup_word,
             dictionary::search_words,
             dictionary::lookup_collins,
